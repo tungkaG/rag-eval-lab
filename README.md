@@ -13,6 +13,7 @@ Phase 2 — dataset and ground truth layer (`custom`, `beir` adapters) is in pla
 Phase 3 — file processing placeholder (see [file_processing/README.md](src/rag_eval_lab/file_processing/README.md)) is in place.
 Phase 4 — chunking strategy layer (`fixed_tokens`, `recursive`) is in place.
 Phase 5 — embedding and indexing (`sentence_transformer` embedding, `faiss`/`bm25` indexes) is in place.
+Phase 6 — retrieval strategies (`dense`, `bm25`, `hybrid` with RRF fusion) is in place.
 No experiment can be run yet; that is intentional.
 
 ## Usage
@@ -141,6 +142,39 @@ model itself. This phase does not reconcile the two tokenizers.
 Model download and real embedding execution only happen when this example
 is run directly — the automated test suite mocks the Sentence Transformer
 model, so it never downloads weights.
+
+### Retrieval
+
+```python
+from rag_eval_lab.core.models import Query
+from rag_eval_lab.retrieval import retrieval_registry
+
+# Reuses the indexes and embedding strategy built above (Phase 5).
+dense_retriever = retrieval_registry.create("dense", embedder=embedding, index=dense_index)
+bm25_retriever = retrieval_registry.create("bm25", index=sparse_index)
+hybrid_retriever = retrieval_registry.create(
+    "hybrid",
+    dense_retriever=dense_retriever,
+    sparse_retriever=bm25_retriever,
+    dense_top_k=50,
+    sparse_top_k=50,
+)
+
+case = evaluation_cases[0]
+query = Query(id=case.query_id, text=case.question)
+
+for name, retriever in (("dense", dense_retriever), ("bm25", bm25_retriever), ("hybrid", hybrid_retriever)):
+    print(f"\n{name}:")
+    for result in retriever.retrieve(query, top_k=5):
+        print(f"  rank={result.rank} score={result.score:.4f} chunk={result.chunk.id} document={result.chunk.document_id}")
+```
+
+All three retrievers share the same `retrieve(query, top_k) -> list[RetrievedChunk]`
+shape. `HybridRetriever` only fuses dense and sparse candidates with
+Reciprocal Rank Fusion (`retrieval.rrf.reciprocal_rank_fusion`); candidate
+counts (`dense_top_k`/`sparse_top_k`) are independent of the final `top_k`.
+Neither retriever builds an index or loads a model — both are constructed
+from the already-built indexes and embedding strategy.
 
 ## Development
 
