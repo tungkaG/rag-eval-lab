@@ -11,6 +11,7 @@ Phase 0 — core contracts (`models`, `protocols`, `registry`, `exceptions`) are
 Phase 1 — generic ingestion (`txt`, `markdown`, `jsonl` loaders) is in place.
 Phase 2 — dataset and ground truth layer (`custom`, `beir` adapters) is in place.
 Phase 3 — file processing placeholder (see [file_processing/README.md](src/rag_eval_lab/file_processing/README.md)) is in place.
+Phase 4 — chunking strategy layer (`fixed_tokens`, `recursive`) is in place.
 No experiment can be run yet; that is intentional.
 
 ## Usage
@@ -58,6 +59,26 @@ evaluation_cases = beir.evaluation_cases()
 
 Both adapters expose the same `documents()` / `evaluation_cases()` shape;
 downstream code never needs to know which adapter produced them.
+
+### Chunking
+
+```python
+from rag_eval_lab.chunking import chunking_registry
+from rag_eval_lab.datasets import dataset_registry
+
+dataset = dataset_registry.create("beir", dataset_dir="datasets/scifact", split="test")
+documents = dataset.documents()
+
+# Swap "fixed_tokens" for "recursive" to change strategy; no other code changes.
+chunker = chunking_registry.create("fixed_tokens", chunk_size=256, overlap=32)
+chunks = [chunk for document in documents for chunk in chunker.chunk(document)]
+
+print(f"documents={len(documents)} chunks={len(chunks)}")
+print(chunks[0])
+```
+
+Both chunkers measure `chunk_size` and `overlap` in tokens (`cl100k_base` by
+default) and return the same internal `list[Chunk]` shape.
 
 ## Development
 

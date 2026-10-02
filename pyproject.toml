@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Modular RAG experimentation and evaluation framework"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "langchain-text-splitters>=0.3",
+    "tiktoken>=0.7",
+]
 
 [project.optional-dependencies]
 dev = [
