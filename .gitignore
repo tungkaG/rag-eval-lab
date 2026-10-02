@@ -7,3 +7,5 @@ build/
 dist/
 results/
 datasets/
+.ipynb_checkpoints/
+notebooks/embedding_cache/
