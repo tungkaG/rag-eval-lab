@@ -10,6 +10,7 @@ See [copilot.md](copilot.md) for the full phased architecture plan.
 Phase 0 — core contracts (`models`, `protocols`, `registry`, `exceptions`) are in place.
 Phase 1 — generic ingestion (`txt`, `markdown`, `jsonl` loaders) is in place.
 Phase 2 — dataset and ground truth layer (`custom`, `beir` adapters) is in place.
+Phase 3 — file processing placeholder (see [file_processing/README.md](src/rag_eval_lab/file_processing/README.md)) is in place.
 No experiment can be run yet; that is intentional.
 
 ## Usage
