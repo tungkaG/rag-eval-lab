@@ -9,6 +9,7 @@ See [copilot.md](copilot.md) for the full phased architecture plan.
 
 Phase 0 — core contracts (`models`, `protocols`, `registry`, `exceptions`) are in place.
 Phase 1 — generic ingestion (`txt`, `markdown`, `jsonl` loaders) is in place.
+Phase 2 — dataset and ground truth layer (`custom`, `beir` adapters) is in place.
 No experiment can be run yet; that is intentional.
 
 ## Usage
@@ -29,6 +30,33 @@ documents = loader.load("datasets/corpus.jsonl")
 ```
 
 Every loader returns `list[Document]`, regardless of input format.
+
+### Dataset adapters
+
+```python
+from rag_eval_lab.datasets import dataset_registry
+
+# Custom native dataset: a corpus (any ingestion format) plus evaluation JSONL.
+custom = dataset_registry.create(
+    "custom",
+    corpus_path="datasets/manuals/corpus.jsonl",
+    evaluation_path="datasets/manuals/evaluation.jsonl",
+    corpus_format="jsonl",
+    corpus_fields={"id": "id", "text": "text"},
+)
+documents = custom.documents()
+evaluation_cases = custom.evaluation_cases()
+
+# BEIR: point at a locally extracted dataset directory, e.g. SciFact
+# downloaded and unzipped to `datasets/scifact/` containing
+# corpus.jsonl, queries.jsonl, and qrels/test.tsv.
+beir = dataset_registry.create("beir", dataset_dir="datasets/scifact", split="test")
+documents = beir.documents()
+evaluation_cases = beir.evaluation_cases()
+```
+
+Both adapters expose the same `documents()` / `evaluation_cases()` shape;
+downstream code never needs to know which adapter produced them.
 
 ## Development
 

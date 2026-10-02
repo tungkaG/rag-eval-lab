@@ -358,11 +358,14 @@ and:
 
 ```text
 src/rag_eval_lab/ground_truth/
-    models.py
-    capabilities.py
-    validator.py
     adapters.py
+    validator.py
 ```
+
+`GroundTruth`, `PageReference`, and `GroundTruthCapability` already live in
+`core/models.py` (Phase 0). This package only adds native record conversion
+(`adapters.py`) and the basic normalization and relation checks
+(`validator.py`) on top of them; it does not define parallel models.
 
 ## Custom dataset
 
@@ -374,19 +377,21 @@ Example:
 {
   "query_id": "q1",
   "question": "What is the maximum operating temperature?",
-  "document_relevance": {"manual_1": 1},
-  "pages": [
-    {
-      "document_id": "manual_1",
-      "page_start": 23,
-      "page_end": 23
-    }
-  ],
-  "reference_answer": "85 degrees Celsius"
+  "ground_truth": {
+    "document_relevance": {"manual_1": 1},
+    "page_references": [
+      {"document_id": "manual_1", "page_start": 23, "page_end": 23}
+    ],
+    "reference_answer": "85 degrees Celsius",
+    "evidence_texts": [],
+    "keywords": [],
+    "metadata": {}
+  }
 }
 ```
 
-Fields must be optional where appropriate.
+Only `query_id` and `question` are required; a missing or partial
+`ground_truth` object falls back to the `GroundTruth` field defaults.
 
 ## BEIR adapter
 
