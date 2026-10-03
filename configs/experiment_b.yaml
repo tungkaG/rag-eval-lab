@@ -1,0 +1,47 @@
+experiment:
+  name: fixed512_dense_none
+
+dataset:
+  adapter: beir
+  params:
+    dataset_dir: data/scifact
+    split: test
+
+chunking:
+  strategy: fixed_tokens
+  params:
+    chunk_size: 512
+    overlap: 32
+
+embedding:
+  strategy: sentence_transformer
+  params:
+    model_name: BAAI/bge-base-en-v1.5
+    batch_size: 32
+    device: cpu
+    query_prompt: "Represent this sentence for searching relevant passages: "
+  cache:
+    enabled: true
+    directory: .cache/embeddings   # default shown; can point anywhere
+    force_recompute: false
+    
+indexing:
+  dense:
+    strategy: faiss
+    params: {}
+
+retrieval:
+  strategy: dense
+  top_k: 50
+  params: {}
+
+reranking:
+  strategy: none
+  final_k: 10
+  params: {}
+
+evaluation:
+  k_values: [1, 5, 10]
+
+output:
+  directory: results

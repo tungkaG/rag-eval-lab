@@ -1027,115 +1027,178 @@ No dataset adapter contains metric logic.
 No metric contains BEIR specific logic.
 
 
-# Phase 9, Experiment Configuration and Runner
+# Phase 9, Experiment Configuration and Runner (implemented)
 
 ## Objective
 
 Create the actual plug and play experiment lab.
 
-## Create
+## Created
 
 ```text
 src/rag_eval_lab/experiments/
+    __init__.py
+    __main__.py
     config.py
     runner.py
     result_store.py
-    comparison.py
 ```
+
+`comparison.py` stays Phase 10 scope, as originally planned.
 
 ## Configuration
 
-Experiments should be completely describable through YAML.
-
-Example:
+Experiments are completely describable through YAML. Strategy constructor
+parameters are kept as plain `params` dictionaries and passed straight
+through to the existing registries via `**params` — there are no
+per-strategy config classes. Actual shape (see
+[README.md](README.md#experiments) and
+[configs/experiments/](configs/experiments/) for runnable examples):
 
 ```yaml
 experiment:
-  name: fixed512_dense_no_reranker
+  name: fixed256_dense_none
 
 dataset:
   adapter: beir
-  name: scifact
+  params:
+    dataset_dir: data/scifact
+    split: test
 
 chunking:
   strategy: fixed_tokens
-  chunk_size: 512
-  overlap: 64
+  params:
+    chunk_size: 256
+    overlap: 32
 
 embedding:
   strategy: sentence_transformer
-  model: BAAI/bge_base_en_v1_5
+  params:
+    model_name: BAAI/bge-base-en-v1.5
+    batch_size: 32
+    device: cpu
+    query_prompt: "Represent this sentence for searching relevant passages: "
+
+indexing:
+  dense:
+    strategy: faiss
+    params: {}
+  sparse:
+    strategy: bm25
+    params: {}
 
 retrieval:
   strategy: dense
   top_k: 50
+  params: {}
 
 reranking:
   strategy: none
   final_k: 10
+  params: {}
 
 evaluation:
-  k_values:
-    [1, 5, 10]
+  k_values: [1, 5, 10]
+
+output:
+  directory: results
 ```
+
+`embedding` and `indexing.dense` are optional and only required when
+`retrieval.strategy` is `dense` or `hybrid`; a BM25-only experiment omits
+them and the runner never instantiates an embedding model. Relative paths
+(e.g. `dataset.params.dataset_dir`, `output.directory`) are interpreted
+relative to the current working directory the command is run from (expected
+to be the repository root), not relative to the YAML file itself.
 
 ## Runner
 
-The runner owns orchestration only.
-
-Conceptually:
+The runner owns orchestration only; algorithms stay in their existing
+components (`ExperimentRunner.run(config) -> ExperimentResult` in
+`runner.py`):
 
 ```text
-load dataset
+create dataset adapter, load documents and evaluation cases
 
-load documents
+create chunker, chunk documents
 
-chunk documents
+build the components required by the selected retrieval strategy
+(dense: embedder + dense index; bm25: sparse index only; hybrid: both)
 
-build index
+create retriever and reranker through their registries
 
 for each evaluation case:
 
-    retrieve
+    create a Query from the case's query_id and question
 
-    rerank
+    retrieve top_k candidates
 
-    evaluate
+    rerank to final_k
 
-aggregate results
+    build an EvaluationSample and evaluate it
 
-store experiment
+average metrics across cases, grouped by (name, k)
+
+save and return the ExperimentResult
 ```
 
-The runner must contain almost no algorithm specific logic.
+Models and indexes are instantiated once per experiment run, not rebuilt
+per query.
 
 ## Experiment metadata
 
-Store:
+Stored in `ExperimentResult.config` (the full parsed YAML) and
+`ExperimentResult.metadata`:
 
 ```text
-experiment identifier
+experiment name
 
-timestamp
-
-dataset
-
-strategy configuration
-
-model names
-
-chunk count
+UTC timestamp
 
 document count
 
+chunk count
+
 query count
 
-metrics
-
-timings
-
-software version information where practical
+software version information (rag_eval_lab, python, platform)
 ```
+
+Timings (`ExperimentResult.timings`, all `perf_counter`-based seconds):
+dataset loading, chunking, corpus embedding (dense only), index building,
+retrieval (includes query embedding), reranking, evaluation, and total.
+
+## Corpus embedding caching (optional)
+
+`embedding.cache` (`enabled`/`directory`/`force_recompute`, disabled by
+default, kept separate from `embedding.params`) lets `_prepare_dense_index`
+(`retrieval/builders.py`) skip `embed_documents` on a cache hit. The cache
+key (`embedding/cache.py`) is a SHA256 hash of the embedding strategy, its
+params, the ordered chunk ids/texts, and a cache format version; one
+`<key>.npy` file per configuration. The embedding model is still constructed
+and the dense index still rebuilt every run; BM25 never touches the cache.
+A relative `cache.directory` resolves under the repository root
+(`core/paths.py`'s `REPO_ROOT`/`resolve_under_repo_root`), not the current
+working directory, so caches land in one stable place regardless of where a
+command is run from.
+`ExperimentResult.metadata` records `embedding_cache_enabled`,
+`embedding_cache_hit`, and `embedding_cache_key`.
+
+## Result storage
+
+`result_store.py` implements the existing `ResultStore` protocol as
+`JsonResultStore`: one `<experiment_id>.json` file per experiment under
+`output.directory`, using `dataclasses.asdict` / manual reconstruction for
+`save()` / `load()`. SQLite, comparison tables, and dashboards stay Phase 10
+scope.
+
+## Command
+
+```powershell
+python -m rag_eval_lab.experiments configs/experiments/experiment_a.yaml
+```
+
+Prints the saved result path and a compact `name@k = value` metric summary.
 
 ## Acceptance criteria
 

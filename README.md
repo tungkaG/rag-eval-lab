@@ -16,7 +16,8 @@ Phase 5 — embedding and indexing (`sentence_transformer` embedding, `faiss`/`b
 Phase 6 — retrieval strategies (`dense`, `bm25`, `hybrid` with RRF fusion) is in place.
 Phase 7 — reranking strategies (`none`, `cross_encoder`) is in place.
 Phase 8 — retrieval evaluation engine (automatic metric selection from ground truth capabilities) is in place.
-No experiment can be run yet; that is intentional.
+Phase 9 — experiment configuration and runner (YAML configs, `ExperimentRunner`, JSON `ResultStore`, CLI) is in place.
+Before/after comparison reports and SQLite storage are intentionally deferred to Phase 10.
 
 ## Usage
 
@@ -234,6 +235,169 @@ for a SciFact-style case (document relevance only) that automatically
 selects the five document metrics at each `k`; page metrics are added only
 when `page_references` are also present. No dataset adapter or metric
 contains BEIR-specific logic.
+
+### Experiments
+
+A complete experiment (dataset → chunking → embedding/indexing → retrieval →
+reranking → evaluation) is fully describable through a single YAML file, run
+with:
+
+```powershell
+& .venv\Scripts\python.exe -m rag_eval_lab.experiments configs/experiments/experiment_a.yaml
+```
+
+```yaml
+experiment:
+  name: fixed256_dense_none
+
+dataset:
+  adapter: beir
+  params:
+    dataset_dir: data/scifact
+    split: test
+
+chunking:
+  strategy: fixed_tokens
+  params:
+    chunk_size: 256
+    overlap: 32
+
+embedding:
+  strategy: sentence_transformer
+  params:
+    model_name: BAAI/bge-base-en-v1.5
+    batch_size: 32
+    device: cpu
+    query_prompt: "Represent this sentence for searching relevant passages: "
+
+indexing:
+  dense:
+    strategy: faiss
+    params: {}
+
+retrieval:
+  strategy: dense
+  top_k: 50
+  params: {}
+
+reranking:
+  strategy: none
+  final_k: 10
+  params: {}
+
+evaluation:
+  k_values: [1, 5, 10]
+
+output:
+  directory: results
+```
+
+Strategy constructor parameters are kept as plain dictionaries (`params`)
+and passed straight through to the existing registries via `**params` —
+there are no per-strategy configuration classes. Relative paths inside a
+config file (`dataset.params.dataset_dir`, `output.directory`) are
+interpreted relative to the current working directory the command is run
+from (expected to be the repository root), not relative to the YAML file.
+
+For BM25-only retrieval, omit `embedding` and `indexing.dense` entirely and
+use `indexing.sparse` + `retrieval.strategy: bm25` — the runner never
+instantiates an embedding model in that case. `hybrid` retrieval needs both
+`indexing.dense` and `indexing.sparse`, with `dense_top_k` / `sparse_top_k`
+/ `rrf_k` under `retrieval.params`. CrossEncoder reranking uses
+`reranking.strategy: cross_encoder` with `model_name` (and other
+`CrossEncoderReranker` constructor arguments) under `reranking.params`.
+
+#### Corpus embedding caching
+
+`embedding` accepts an optional `cache` section, disabled by default:
+
+```yaml
+embedding:
+  strategy: sentence_transformer
+  params:
+    model_name: BAAI/bge-base-en-v1.5
+  cache:
+    enabled: true
+    directory: .cache/embeddings
+    force_recompute: false
+```
+
+Cache settings never reach the embedding constructor — only `params` does.
+When enabled, corpus embeddings are cached under `cache.directory` as one
+`<key>.npy` file per experiment configuration, keyed by a SHA256 fingerprint
+of the embedding strategy, its `params`, the ordered chunk ids/texts, and a
+cache format version; different configurations coexist as separate files,
+and changing any of those inputs produces a different key (a cache miss).
+`force_recompute: true` bypasses an existing entry and overwrites it. The
+embedding model itself is still constructed on a cache hit (query embedding
+needs it) and the dense index is still rebuilt every run — only the corpus
+`embed_documents` call is skipped. BM25 never touches the embedding cache.
+Unlike `dataset.params.dataset_dir` / `output.directory` (resolved relative
+to the current working directory), a relative `cache.directory` always
+resolves under the repository root — so `.cache/embeddings` always means
+`<repo root>/.cache/embeddings`, no matter where a command is run from.
+Because `corpus_embedding_seconds` measures loading-or-computing corpus
+embeddings (including model construction), cached runs report a much
+smaller `corpus_embedding_seconds` than uncached runs — compare timings
+with caching consistently enabled or disabled, not across the two. Whether
+caching was enabled, whether it was a hit, and the cache key are recorded in
+`ExperimentResult.metadata` (`embedding_cache_enabled`, `embedding_cache_hit`,
+`embedding_cache_key`).
+
+[configs/experiments/](configs/experiments/) contains three ready-to-run
+SciFact configs that only change chunking/reranking: `experiment_a.yaml`
+(fixed tokens 256, dense, no reranker), `experiment_b.yaml` (fixed tokens
+512, dense, no reranker), and `experiment_c.yaml` (same as B, with
+`cross_encoder` reranking).
+
+`ExperimentRunner.run(config)` instantiates every model/index once per run
+and reuses them for every evaluation case. Metric values are averaged
+across cases, grouped by `(metric name, k)`, using the number of cases that
+produced that metric as the denominator — a case whose ground truth lacks
+a capability (e.g. no `page_references`) simply does not contribute to that
+metric's average. Evaluation always runs on the final (reranked) results;
+automatic before/after comparison is deferred to Phase 10. As in Phase 8,
+document metrics deduplicate the supplied chunks by `document_id` before
+applying `k`, so returning 10 chunks can yield fewer than 10 unique
+documents.
+
+`JsonResultStore` (the `ResultStore` implementation) saves one
+`<experiment_id>.json` file per experiment under `output.directory` and
+reconstructs `ExperimentResult`/`MetricResult` dataclasses on `load()`.
+
+```python
+from rag_eval_lab.experiments import ExperimentRunner, load_config
+
+config = load_config("configs/experiments/experiment_a.yaml")
+result = ExperimentRunner().run(config)  # saves under config.output.directory
+
+for metric in result.metrics:
+    print(f"{metric.name}@{metric.k} = {metric.value:.4f}")
+```
+
+`ExperimentRunner(result_store=...)` takes an optional `ResultStore`; when
+omitted, `run()` creates a `JsonResultStore(config.output.directory)` itself,
+so both direct usage and the CLI always write where the config says. Inject
+your own `ResultStore` (e.g. a fake in tests, or a future SQLite store) to
+override this.
+
+#### Adding a retrieval strategy
+
+`retrieval.strategy` is resolved through `retrieval_builder_registry`
+(`retrieval/builders.py`), not inspected by the runner. Each registered
+`RetrievalBuilder.build(config, chunks) -> PreparedRetrieval` owns preparing
+whatever its strategy needs (embedder, dense/sparse index) and returns the
+constructed retriever plus its preparation timings; `_prepare_dense_index`
+and `_prepare_sparse_index` are shared helpers so `hybrid` doesn't duplicate
+`dense`'s or `bm25`'s setup. To add a new strategy: implement its
+`RetrievalStrategy` (and register it in `retrieval_registry` if new),
+implement a `RetrievalBuilder` for it, and register that builder:
+
+```python
+retrieval_builder_registry.register("my_strategy")(MyStrategyBuilder)
+```
+
+No change to `runner.py` or `config.py` is required.
 
 ## Development
 

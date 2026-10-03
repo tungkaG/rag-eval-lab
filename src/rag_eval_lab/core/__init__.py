@@ -21,6 +21,7 @@ from rag_eval_lab.core.models import (
     RetrievedChunk,
 )
 from rag_eval_lab.core.registry import Registry
+from rag_eval_lab.core.paths import REPO_ROOT, resolve_under_repo_root
 
 __all__ = [
     "Chunk",
@@ -35,9 +36,11 @@ __all__ = [
     "PageReference",
     "Query",
     "RagEvalLabError",
+    "REPO_ROOT",
     "Registry",
     "RegistryError",
     "RetrievedChunk",
     "UnknownStrategyError",
     "ValidationError",
+    "resolve_under_repo_root",
 ]

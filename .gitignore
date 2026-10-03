@@ -9,3 +9,4 @@ results/
 data/
 .ipynb_checkpoints/
 notebooks/embedding_cache/
+.cache/
