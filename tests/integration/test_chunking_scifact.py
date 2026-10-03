@@ -7,7 +7,7 @@ from rag_eval_lab.core.models import Chunk
 from rag_eval_lab.datasets.registry import dataset_registry
 
 DATASET_DIR = (
-    Path(__file__).resolve().parents[2] / "datasets" / "scifact"
+    Path(__file__).resolve().parents[2] / "data" / "scifact"
 )
 
 

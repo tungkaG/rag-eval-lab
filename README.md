@@ -14,6 +14,8 @@ Phase 3 — file processing placeholder (see [file_processing/README.md](src/rag
 Phase 4 — chunking strategy layer (`fixed_tokens`, `recursive`) is in place.
 Phase 5 — embedding and indexing (`sentence_transformer` embedding, `faiss`/`bm25` indexes) is in place.
 Phase 6 — retrieval strategies (`dense`, `bm25`, `hybrid` with RRF fusion) is in place.
+Phase 7 — reranking strategies (`none`, `cross_encoder`) is in place.
+Phase 8 — retrieval evaluation engine (automatic metric selection from ground truth capabilities) is in place.
 No experiment can be run yet; that is intentional.
 
 ## Usage
@@ -52,9 +54,9 @@ documents = custom.documents()
 evaluation_cases = custom.evaluation_cases()
 
 # BEIR: point at a locally extracted dataset directory, e.g. SciFact
-# downloaded and unzipped to `datasets/scifact/` containing
+# downloaded and unzipped to `data/scifact/` containing
 # corpus.jsonl, queries.jsonl, and qrels/test.tsv.
-beir = dataset_registry.create("beir", dataset_dir="datasets/scifact", split="test")
+beir = dataset_registry.create("beir", dataset_dir="data/scifact", split="test")
 documents = beir.documents()
 evaluation_cases = beir.evaluation_cases()
 ```
@@ -68,7 +70,7 @@ downstream code never needs to know which adapter produced them.
 from rag_eval_lab.chunking import chunking_registry
 from rag_eval_lab.datasets import dataset_registry
 
-dataset = dataset_registry.create("beir", dataset_dir="datasets/scifact", split="test")
+dataset = dataset_registry.create("beir", dataset_dir="data/scifact", split="test")
 documents = dataset.documents()
 
 # Swap "fixed_tokens" for "recursive" to change strategy; no other code changes.
@@ -92,7 +94,7 @@ from rag_eval_lab.datasets import dataset_registry
 from rag_eval_lab.embedding import embedding_registry
 from rag_eval_lab.indexing import dense_index_registry, sparse_index_registry
 
-dataset = dataset_registry.create("beir", dataset_dir="datasets/scifact", split="test")
+dataset = dataset_registry.create("beir", dataset_dir="data/scifact", split="test")
 documents = dataset.documents()
 evaluation_cases = dataset.evaluation_cases()
 
@@ -175,6 +177,63 @@ Reciprocal Rank Fusion (`retrieval.rrf.reciprocal_rank_fusion`); candidate
 counts (`dense_top_k`/`sparse_top_k`) are independent of the final `top_k`.
 Neither retriever builds an index or loads a model — both are constructed
 from the already-built indexes and embedding strategy.
+
+### Reranking
+
+```python
+from rag_eval_lab.reranking import reranking_registry
+
+# Retrieve a wider candidate pool once, then compare rerankers on the same list.
+candidates = dense_retriever.retrieve(query, top_k=50)
+
+baseline = reranking_registry.create("none")
+cross_encoder = reranking_registry.create(
+    "cross_encoder",
+    model_name="cross-encoder/ms-marco-MiniLM-L6-v2",
+)
+
+for name, reranker in (("none", baseline), ("cross_encoder", cross_encoder)):
+    print(f"\n{name}:")
+    for result in reranker.rerank(query, candidates, top_k=10):
+        print(f"  rank={result.rank} score={result.score:.4f} chunk={result.chunk.id} document={result.chunk.document_id}")
+
+# `candidates` is never mutated by either reranker, so it stays available
+# for further comparisons.
+```
+
+`NoReranker` is the baseline: it returns the first `top_k` candidates
+unchanged. `CrossEncoderReranker` wraps `sentence_transformers.CrossEncoder`,
+scoring `(query.text, chunk.text)` pairs and returning new `RetrievedChunk`s
+with fresh ranks; it does not retrieve candidates itself — candidate count
+(e.g. retrieve 50, rerank to 10) is entirely the caller's responsibility.
+
+### Evaluation
+
+```python
+from rag_eval_lab.evaluation import EvaluationEngine
+from rag_eval_lab.core.models import EvaluationSample
+
+engine = EvaluationEngine(k_values=[1, 5, 10])
+
+# Same evaluation_case, two separate samples: before and after reranking.
+before = EvaluationSample(evaluation_case=case, retrieved_chunks=candidates[:10])
+after = EvaluationSample(
+    evaluation_case=case,
+    retrieved_chunks=cross_encoder.rerank(query, candidates, top_k=10),
+)
+
+for label, sample in (("before reranking", before), ("after reranking", after)):
+    print(f"\n{label}:")
+    for result in engine.evaluate(sample):
+        print(f"  {result.name}@{result.k} = {result.value:.4f}")
+```
+
+`EvaluationEngine` asks the planner which metrics apply by comparing each
+metric's `required_capabilities` against `case.ground_truth.capabilities` —
+for a SciFact-style case (document relevance only) that automatically
+selects the five document metrics at each `k`; page metrics are added only
+when `page_references` are also present. No dataset adapter or metric
+contains BEIR-specific logic.
 
 ## Development
 
