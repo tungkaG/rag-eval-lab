@@ -6,6 +6,6 @@ __pycache__/
 build/
 dist/
 results/
-datasets/
+data/
 .ipynb_checkpoints/
 notebooks/embedding_cache/
