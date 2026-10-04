@@ -2,6 +2,7 @@
 
 from rag_eval_lab.core.exceptions import (
     ConfigurationError,
+    GenerationError,
     RagEvalLabError,
     RegistryError,
     UnknownStrategyError,
@@ -22,6 +23,7 @@ from rag_eval_lab.core.models import (
 )
 from rag_eval_lab.core.registry import Registry
 from rag_eval_lab.core.paths import REPO_ROOT, resolve_under_repo_root
+from rag_eval_lab.core.env import load_env_file
 
 __all__ = [
     "Chunk",
@@ -30,6 +32,7 @@ __all__ = [
     "EvaluationCase",
     "EvaluationSample",
     "ExperimentResult",
+    "GenerationError",
     "GroundTruth",
     "GroundTruthCapability",
     "MetricResult",
@@ -42,5 +45,6 @@ __all__ = [
     "RetrievedChunk",
     "UnknownStrategyError",
     "ValidationError",
+    "load_env_file",
     "resolve_under_repo_root",
 ]

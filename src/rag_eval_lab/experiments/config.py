@@ -12,6 +12,10 @@ be the repository root), not relative to the YAML file's own location.
 `embedding.cache.directory` is the exception: it always resolves under the
 repository root (via `core.paths.resolve_under_repo_root`), regardless of
 the current working directory, so caches land in one stable place.
+
+Generation is optional and disabled unless `generation.enabled` is `true`;
+API keys (e.g. `GEMINI_API_KEY`) are read from the environment, never from
+this configuration, so they never end up in YAML, logs, or saved results.
 """
 
 from __future__ import annotations
@@ -108,6 +112,20 @@ class OutputConfig:
 
 
 @dataclass(slots=True)
+class GenerationConfig:
+    """Optional answer generation settings; disabled unless explicitly enabled.
+
+    `params` (e.g. `model_name`) is passed straight through to the registered
+    `generation_registry` strategy, the same way every other strategy's
+    `params` is -- no per-provider configuration class.
+    """
+
+    enabled: bool = False
+    provider: str | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ExperimentConfig:
     """The fully parsed configuration for a single experiment run."""
 
@@ -120,6 +138,7 @@ class ExperimentConfig:
     indexing: IndexingConfig = field(default_factory=IndexingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -163,6 +182,17 @@ def _embedding_config(section: dict[str, Any]) -> EmbeddingConfig:
         params=dict(section.get("params") or {}),
         cache=cache,
     )
+
+
+def _generation_config(section: dict[str, Any] | None) -> GenerationConfig:
+    # Missing section, or an explicit `enabled: false`, both mean disabled;
+    # provider/model_name are only required once generation is enabled.
+    if not section or not section.get("enabled", False):
+        return GenerationConfig(enabled=False)
+    provider = _required(section, "provider", "generation.provider")
+    params = dict(section.get("params") or {})
+    _required(params, "model_name", "generation.params.model_name")
+    return GenerationConfig(enabled=True, provider=provider, params=params)
 
 
 def _parse_config(raw: Any) -> ExperimentConfig:
@@ -218,6 +248,8 @@ def _parse_config(raw: Any) -> ExperimentConfig:
     output_section = raw.get("output") or {}
     output = OutputConfig(directory=output_section.get("directory") or "results")
 
+    generation = _generation_config(raw.get("generation"))
+
     return ExperimentConfig(
         name=name,
         dataset=dataset,
@@ -228,5 +260,6 @@ def _parse_config(raw: Any) -> ExperimentConfig:
         reranking=reranking,
         evaluation=evaluation,
         output=output,
+        generation=generation,
         raw=raw,
     )

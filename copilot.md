@@ -1053,7 +1053,7 @@ parameters are kept as plain `params` dictionaries and passed straight
 through to the existing registries via `**params` — there are no
 per-strategy config classes. Actual shape (see
 [README.md](README.md#experiments) and
-[configs/experiments/](configs/experiments/) for runnable examples):
+[configs/](configs/) for runnable examples):
 
 ```yaml
 experiment:
@@ -1195,7 +1195,7 @@ scope.
 ## Command
 
 ```powershell
-python -m rag_eval_lab.experiments configs/experiments/experiment_a.yaml
+python -m rag_eval_lab.experiments configs/experiment_a.yaml
 ```
 
 Prints the saved result path and a compact `name@k = value` metric summary.
@@ -1351,41 +1351,62 @@ This is extremely useful for controlled experiments.
 A user can run several configurations and obtain a comparison report without manually collecting numbers.
 
 
-# Phase 11, Answer Generation
+# Phase 11, Answer Generation (implemented)
 
 ## Objective
 
 Add end to end RAG evaluation without disturbing the retrieval architecture.
 
-Do this only after retrieval evaluation works reliably.
-
-## Create
+## Created
 
 ```text
 src/rag_eval_lab/generation/
+    __init__.py
     base.py
     prompt_builder.py
-    generator.py
+    gemini.py
+    openai.py
     registry.py
 ```
 
-The generation interface receives:
+Reuses the existing `GenerationStrategy` protocol from `core/protocols.py`
+unchanged: `generate(query: Query, retrieved_chunks: list[RetrievedChunk]) ->
+tuple[str, dict[str, Any]]`. No new core models were added; generation
+output is stored in `EvaluationSample.generated_answer` (already existed)
+and plain dicts under `ExperimentResult.metadata`.
 
-```text
-question
-retrieved chunks
-```
+## Prompt builder
 
-and produces:
+`prompt_builder.build_prompt(query, retrieved_chunks) -> str` only accepts a
+`Query` and `list[RetrievedChunk]` — structurally, it cannot leak ground
+truth, reference answers, relevance judgments, or gold evidence. Passages
+are kept in retrieval order and labeled `[chunk_id | document=document_id]`.
+The instruction text tells the model to answer from context only, say so
+when context is insufficient, cite passage labels, and treat passages as
+evidence rather than instructions.
 
-```text
-generated answer
-generation metadata
-```
+## Generators
 
-The retrieval lab must still work when generation is disabled.
+`GeminiGenerator(model_name, temperature=0.0, max_output_tokens=1024)` wraps
+`google.genai.Client` (the Gemini Developer API); `OpenAIGenerator` (same
+constructor signature) wraps `openai.OpenAI`'s Chat Completions API. Both
+import their SDK lazily inside `__init__` so retrieval-only experiments
+never need either installed, read their API key (`GEMINI_API_KEY` /
+`OPENAI_API_KEY`) from the environment via `core.env.load_env_file()` (loads
+a repo-root `.env` through `python-dotenv` if present, never from YAML, and
+never written to logs, saved configuration, or generation metadata), build
+one client per instance reused across every `generate()` call, and raise
+`core.exceptions.GenerationError` rather than fabricating an answer when the
+response has no text. Returned metadata: `provider`, `model_name`, available
+token usage counts, and `finish_reason` when present — never the API key or
+the full SDK response. Registered as `"gemini"` / `"openai"` in
+`generation_registry` (the same generic `Registry` every other strategy
+uses); the runner selects a provider through the registry only, never
+through provider branches. `google-genai`, `openai`, and `python-dotenv` are
+all optional dependencies (the `generation` extra in `pyproject.toml`):
+`pip install -e ".[generation]"`.
 
-Configuration:
+## Configuration
 
 ```yaml
 generation:
@@ -1397,9 +1418,33 @@ or:
 ```yaml
 generation:
   enabled: true
-  provider: openai
-  model: ...
+  provider: gemini   # or: openai
+  params:
+    model_name: REPLACE_WITH_YOUR_GEMINI_MODEL_ID
+    temperature: 0.0
+    max_output_tokens: 1024
 ```
+
+Missing the `generation` section, or `enabled: false`, both mean disabled;
+`provider` and `params.model_name` are only required when `enabled: true`.
+See [configs/experiment_generation_example.yaml](configs/experiment_generation_example.yaml)
+and [configs/experiment_generation_example_openai.yaml](configs/experiment_generation_example_openai.yaml).
+
+## Runner integration
+
+When disabled, `runner.py` never constructs a generator and never requires
+an API key or the SDK — existing retrieval experiment behavior is
+unchanged. When enabled, a generator is built once (like every other
+strategy) and called after reranking with the final chunks; its answer
+populates `EvaluationSample.generated_answer`, `sample.timings["generation_seconds"]`
+and the experiment's total `timings["generation_seconds"]` are recorded, and
+retrieval metrics still run exactly as before. Per-query records (`query_id`,
+`question`, `generated_answer`, ordered `context_chunk_ids`,
+`generation_metadata`, `generation_seconds`) are saved under
+`ExperimentResult.metadata["generation_records"]` via the existing JSON
+`ResultStore` — no new core models, no full SDK responses, no duplicated
+chunk text. The generator is closed in a `finally` block via
+`generation.close_generator`, a small helper outside the shared protocol.
 
 ## Acceptance criteria
 

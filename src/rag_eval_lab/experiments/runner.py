@@ -7,6 +7,11 @@ indexes) are prepared by a `RetrievalBuilder` resolved from
 (see `retrieval/builders.py`). Every other strategy is built through its
 existing registry from an `ExperimentConfig`; this module only wires the
 pieces together and records timings/metadata.
+
+Answer generation (`config.generation`) is entirely optional: when disabled
+(the default), no generator is constructed and no API key or SDK is
+required. When enabled, a generator is built once via `generation_registry`
+and reused for every case, exactly like every other strategy here.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from time import perf_counter
+from typing import Any
 
 import rag_eval_lab
 from rag_eval_lab.chunking.registry import chunking_registry
@@ -25,6 +31,8 @@ from rag_eval_lab.datasets.registry import dataset_registry
 from rag_eval_lab.evaluation.engine import EvaluationEngine
 from rag_eval_lab.experiments.config import ExperimentConfig
 from rag_eval_lab.experiments.result_store import JsonResultStore
+from rag_eval_lab.generation.base import close_generator
+from rag_eval_lab.generation.registry import generation_registry
 from rag_eval_lab.reranking.registry import reranking_registry
 from rag_eval_lab.retrieval.builders import retrieval_builder_registry
 
@@ -74,32 +82,64 @@ class ExperimentRunner:
         reranker = reranking_registry.create(config.reranking.strategy, **config.reranking.params)
         evaluation_engine = EvaluationEngine(k_values=config.evaluation.k_values)
 
+        generator = None
+        if config.generation.enabled:
+            generator = generation_registry.create(config.generation.provider, **config.generation.params)
+
         metric_values: dict[tuple[str, int | None], list[float]] = {}
         retrieval_seconds = 0.0
         reranking_seconds = 0.0
         evaluation_seconds = 0.0
+        generation_seconds = 0.0
+        generation_records: list[dict[str, Any]] = []
 
-        for case in evaluation_cases:
-            query = Query(id=case.query_id, text=case.question)
+        try:
+            for case in evaluation_cases:
+                query = Query(id=case.query_id, text=case.question)
 
-            started = perf_counter()
-            retrieved_chunks = retriever.retrieve(query, config.retrieval.top_k)
-            retrieval_seconds += perf_counter() - started
+                started = perf_counter()
+                retrieved_chunks = retriever.retrieve(query, config.retrieval.top_k)
+                retrieval_seconds += perf_counter() - started
 
-            started = perf_counter()
-            reranked_chunks = reranker.rerank(query, retrieved_chunks, config.reranking.final_k)
-            reranking_seconds += perf_counter() - started
+                started = perf_counter()
+                reranked_chunks = reranker.rerank(query, retrieved_chunks, config.reranking.final_k)
+                reranking_seconds += perf_counter() - started
 
-            sample = EvaluationSample(evaluation_case=case, retrieved_chunks=reranked_chunks)
+                sample = EvaluationSample(evaluation_case=case, retrieved_chunks=reranked_chunks)
 
-            started = perf_counter()
-            for metric_result in evaluation_engine.evaluate(sample):
-                metric_values.setdefault((metric_result.name, metric_result.k), []).append(metric_result.value)
-            evaluation_seconds += perf_counter() - started
+                if generator is not None:
+                    started = perf_counter()
+                    answer, generation_metadata = generator.generate(query, reranked_chunks)
+                    sample_generation_seconds = perf_counter() - started
+                    generation_seconds += sample_generation_seconds
+
+                    sample.generated_answer = answer
+                    sample.timings["generation_seconds"] = sample_generation_seconds
+
+                    generation_records.append(
+                        {
+                            "query_id": case.query_id,
+                            "question": case.question,
+                            "generated_answer": answer,
+                            "context_chunk_ids": [result.chunk.id for result in reranked_chunks],
+                            "generation_metadata": generation_metadata,
+                            "generation_seconds": sample_generation_seconds,
+                        }
+                    )
+
+                started = perf_counter()
+                for metric_result in evaluation_engine.evaluate(sample):
+                    metric_values.setdefault((metric_result.name, metric_result.k), []).append(metric_result.value)
+                evaluation_seconds += perf_counter() - started
+        finally:
+            if generator is not None:
+                close_generator(generator)
 
         timings["retrieval_seconds"] = retrieval_seconds
         timings["reranking_seconds"] = reranking_seconds
         timings["evaluation_seconds"] = evaluation_seconds
+        if config.generation.enabled:
+            timings["generation_seconds"] = generation_seconds
 
         averaged_metrics = [
             MetricResult(name=name, value=sum(values) / len(values), k=k)
@@ -117,6 +157,8 @@ class ExperimentRunner:
             "software_versions": _software_versions(),
         }
         metadata.update(prepared_retrieval.metadata)
+        if generation_records:
+            metadata["generation_records"] = generation_records
 
         experiment_result = ExperimentResult(
             experiment_id=str(uuid.uuid4()),

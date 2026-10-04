@@ -17,6 +17,7 @@ Phase 6 — retrieval strategies (`dense`, `bm25`, `hybrid` with RRF fusion) is 
 Phase 7 — reranking strategies (`none`, `cross_encoder`) is in place.
 Phase 8 — retrieval evaluation engine (automatic metric selection from ground truth capabilities) is in place.
 Phase 9 — experiment configuration and runner (YAML configs, `ExperimentRunner`, JSON `ResultStore`, CLI) is in place.
+Phase 11 — optional answer generation (`gemini`/`openai` providers, disabled by default) is in place.
 Before/after comparison reports and SQLite storage are intentionally deferred to Phase 10.
 
 ## Usage
@@ -243,7 +244,7 @@ reranking → evaluation) is fully describable through a single YAML file, run
 with:
 
 ```powershell
-& .venv\Scripts\python.exe -m rag_eval_lab.experiments configs/experiments/experiment_a.yaml
+& .venv\Scripts\python.exe -m rag_eval_lab.experiments configs/experiment_a.yaml
 ```
 
 ```yaml
@@ -344,7 +345,7 @@ caching was enabled, whether it was a hit, and the cache key are recorded in
 `ExperimentResult.metadata` (`embedding_cache_enabled`, `embedding_cache_hit`,
 `embedding_cache_key`).
 
-[configs/experiments/](configs/experiments/) contains three ready-to-run
+[configs/](configs/) contains three ready-to-run
 SciFact configs that only change chunking/reranking: `experiment_a.yaml`
 (fixed tokens 256, dense, no reranker), `experiment_b.yaml` (fixed tokens
 512, dense, no reranker), and `experiment_c.yaml` (same as B, with
@@ -368,7 +369,7 @@ reconstructs `ExperimentResult`/`MetricResult` dataclasses on `load()`.
 ```python
 from rag_eval_lab.experiments import ExperimentRunner, load_config
 
-config = load_config("configs/experiments/experiment_a.yaml")
+config = load_config("configs/experiment_a.yaml")
 result = ExperimentRunner().run(config)  # saves under config.output.directory
 
 for metric in result.metrics:
@@ -398,6 +399,65 @@ retrieval_builder_registry.register("my_strategy")(MyStrategyBuilder)
 ```
 
 No change to `runner.py` or `config.py` is required.
+
+### Answer generation (optional, Phase 11)
+
+Generation is disabled unless `generation.enabled: true`; when disabled (or
+the section is absent), no generator is constructed and neither an API key
+nor any generation SDK is required. Install the optional extra, then either
+export key(s) in the shell or copy [.env.example](.env.example) to `.env`
+(gitignored) and fill them in — `python-dotenv` loads it automatically, no
+further setup needed:
+
+```powershell
+pip install -e ".[generation]"
+$env:GEMINI_API_KEY = "your-key"   # and/or
+$env:OPENAI_API_KEY = "your-key"
+```
+
+```yaml
+generation:
+  enabled: true
+  provider: gemini   # or: openai
+  params:
+    model_name: REPLACE_WITH_YOUR_GEMINI_MODEL_ID  # e.g. gemini-2.0-flash
+    temperature: 0.0
+    max_output_tokens: 1024
+```
+
+See [configs/experiment_generation_example.yaml](configs/experiment_generation_example.yaml)
+and [configs/experiment_generation_example_openai.yaml](configs/experiment_generation_example_openai.yaml)
+for full runnable configs with the model ID placeholder marked. `provider`
+is resolved through `generation_registry` (currently `"gemini"` and
+`"openai"`), the same registry pattern as every other strategy — the runner
+never branches on provider name, so adding another provider is just a new
+`GenerationStrategy` implementation registered under a new name. `params`
+(e.g. `model_name`) is passed straight through to the registered generator's
+constructor; `provider`/`model_name` are only required when `enabled: true`.
+
+When enabled, the generator is constructed once per experiment and reused
+for every query. After reranking, it is called with the question and the
+final reranked chunks only — it never sees ground truth, reference answers,
+relevance judgments, or gold evidence. `EvaluationSample.generated_answer`
+is populated, `sample.timings["generation_seconds"]` and
+`ExperimentResult.timings["generation_seconds"]` (total) are recorded, and
+retrieval metrics are still computed exactly as before (Phase 11 adds no
+answer metrics). Per-query generation records — `query_id`, `question`,
+`generated_answer`, ordered `context_chunk_ids`, `generation_metadata`
+(provider, model name, available token usage, finish reason — never the API
+key), and `generation_seconds` — are saved under
+`ExperimentResult.metadata["generation_records"]` using the existing JSON
+`ResultStore`; no new core models or full SDK responses are stored. API keys
+(`GEMINI_API_KEY`, `OPENAI_API_KEY`) are read directly from the environment
+by each generator and never written to YAML, logs, saved configuration, or
+generation metadata.
+
+Each provider SDK (`from google import genai`, `from openai import OpenAI`)
+is imported lazily inside its generator's `__init__`, so retrieval-only
+experiments never require either installed. The client is built once and
+closed after the experiment via `generation.close_generator` (a small
+helper, not part of the shared `GenerationStrategy` protocol, since not
+every provider needs explicit cleanup).
 
 ## Development
 

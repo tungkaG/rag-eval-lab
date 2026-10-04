@@ -60,6 +60,9 @@ def test_loads_minimal_valid_configuration(tmp_path: Path) -> None:
     assert config.embedding is None
     assert config.indexing.dense is None
     assert config.indexing.sparse is None
+    assert config.generation.enabled is False
+    assert config.generation.provider is None
+    assert config.generation.params == {}
 
 
 def test_parses_full_configuration_with_embedding_and_indexing(tmp_path: Path) -> None:
@@ -196,6 +199,73 @@ retrieval:
 def test_missing_experiment_name_raises_configuration_error(tmp_path: Path) -> None:
     content = MINIMAL_VALID.replace("name: test_experiment", "name:")
 
+    with pytest.raises(ConfigurationError):
+        load_config(_write(tmp_path, content))
+
+
+def test_generation_disabled_by_default_when_section_absent(tmp_path: Path) -> None:
+    config = load_config(_write(tmp_path, MINIMAL_VALID))
+
+    assert config.generation.enabled is False
+
+
+def test_generation_explicitly_disabled(tmp_path: Path) -> None:
+    content = MINIMAL_VALID + "\ngeneration:\n  enabled: false\n"
+
+    config = load_config(_write(tmp_path, content))
+
+    assert config.generation.enabled is False
+    assert config.generation.provider is None
+
+
+def test_generation_enabled_parses_provider_and_params(tmp_path: Path) -> None:
+    content = (
+        MINIMAL_VALID
+        + """
+generation:
+  enabled: true
+  provider: gemini
+  params:
+    model_name: gemini-test-model
+    temperature: 0.0
+    max_output_tokens: 1024
+"""
+    )
+    config = load_config(_write(tmp_path, content))
+
+    assert config.generation.enabled is True
+    assert config.generation.provider == "gemini"
+    assert config.generation.params == {
+        "model_name": "gemini-test-model",
+        "temperature": 0.0,
+        "max_output_tokens": 1024,
+    }
+
+
+def test_generation_enabled_without_provider_raises_configuration_error(tmp_path: Path) -> None:
+    content = (
+        MINIMAL_VALID
+        + """
+generation:
+  enabled: true
+  params:
+    model_name: gemini-test-model
+"""
+    )
+    with pytest.raises(ConfigurationError):
+        load_config(_write(tmp_path, content))
+
+
+def test_generation_enabled_without_model_name_raises_configuration_error(tmp_path: Path) -> None:
+    content = (
+        MINIMAL_VALID
+        + """
+generation:
+  enabled: true
+  provider: gemini
+  params: {}
+"""
+    )
     with pytest.raises(ConfigurationError):
         load_config(_write(tmp_path, content))
 

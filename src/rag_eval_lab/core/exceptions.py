@@ -25,3 +25,7 @@ class UnknownStrategyError(RegistryError):
 
 class ConfigurationError(RagEvalLabError):
     """Raised when experiment or strategy configuration is invalid."""
+
+
+class GenerationError(RagEvalLabError):
+    """Raised when an answer generation strategy fails to produce a usable answer."""

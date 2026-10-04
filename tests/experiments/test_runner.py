@@ -251,3 +251,75 @@ reranking:
 
     with pytest.raises(ConfigurationError):
         ExperimentRunner(result_store=JsonResultStore(tmp_path / "results")).run(config)
+
+
+def _fake_generator_factory():
+    """Returns (factory, instances) -- mirrors the `_CallCounter`/factory pattern used elsewhere."""
+    instances: list = []
+
+    class _FakeGenerator:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.calls: list[tuple[str, list[str]]] = []
+            self.closed = False
+            instances.append(self)
+
+        def generate(self, query, retrieved_chunks):
+            self.calls.append((query.id, [result.chunk.id for result in retrieved_chunks]))
+            return f"answer-for-{query.id}", {"provider": "fake", "model_name": self.kwargs.get("model_name")}
+
+        def close(self) -> None:
+            self.closed = True
+
+    return _FakeGenerator, instances
+
+
+def test_generation_disabled_by_default_leaves_no_generation_metadata_or_timings(bm25_config) -> None:
+    config, results_dir = bm25_config
+
+    result = ExperimentRunner(result_store=JsonResultStore(results_dir)).run(config)
+
+    assert "generation_records" not in result.metadata
+    assert "generation_seconds" not in result.timings
+
+
+def test_generation_enabled_populates_answers_timings_and_records(
+    bm25_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, results_dir = bm25_config
+
+    from dataclasses import replace
+
+    from rag_eval_lab.experiments.config import GenerationConfig
+    from rag_eval_lab.generation.registry import generation_registry
+
+    factory, instances = _fake_generator_factory()
+    monkeypatch.setitem(generation_registry._factories, "fake_gemini", factory)
+
+    generation_config = GenerationConfig(enabled=True, provider="fake_gemini", params={"model_name": "fake-model"})
+    config_with_generation = replace(config, generation=generation_config)
+
+    result = ExperimentRunner(result_store=JsonResultStore(results_dir)).run(config_with_generation)
+
+    # Constructed exactly once and reused for both queries, then closed.
+    assert len(instances) == 1
+    assert len(instances[0].calls) == 2
+    assert instances[0].closed is True
+
+    assert "generation_seconds" in result.timings
+
+    records = result.metadata["generation_records"]
+    assert len(records) == 2
+    for record in records:
+        assert record.keys() == {
+            "query_id",
+            "question",
+            "generated_answer",
+            "context_chunk_ids",
+            "generation_metadata",
+            "generation_seconds",
+        }
+        assert record["generated_answer"] == f"answer-for-{record['query_id']}"
+
+    # Existing retrieval metrics are still computed alongside generation.
+    assert any(metric.name == "document_hit_rate" for metric in result.metrics)
