@@ -1,10 +1,11 @@
 from rag_eval_lab.datasets.beir_adapter import BeirDatasetAdapter
 from rag_eval_lab.datasets.custom_dataset import CustomDatasetAdapter
 from rag_eval_lab.datasets.registry import dataset_registry
+from rag_eval_lab.datasets.squad_adapter import SquadDatasetAdapter
 
 
 def test_registered_dataset_adapter_names():
-    assert dataset_registry.keys() == ["beir", "custom"]
+    assert dataset_registry.keys() == ["beir", "custom", "squad"]
 
 
 def test_creates_custom_adapter_with_constructor_arguments(tmp_path):
@@ -24,3 +25,13 @@ def test_creates_beir_adapter_with_constructor_arguments(tmp_path):
 
     assert isinstance(adapter, BeirDatasetAdapter)
     assert adapter.split == "train"
+
+
+def test_creates_squad_adapter_with_constructor_arguments(tmp_path):
+    dataset_path = tmp_path / "dev-v1.1.json"
+    dataset_path.write_text('{"version": "1.1", "data": []}', encoding="utf-8")
+
+    adapter = dataset_registry.create("squad", dataset_path=dataset_path, limit=10)
+
+    assert isinstance(adapter, SquadDatasetAdapter)
+    assert adapter.limit == 10

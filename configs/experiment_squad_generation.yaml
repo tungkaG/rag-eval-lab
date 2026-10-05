@@ -1,0 +1,80 @@
+experiment:
+  name: squad_small_dense_none_local_generation
+
+# NOTE: SquadDatasetAdapter builds a SHARED corpus from every paragraph in
+# the dev set (independent of the question `limit` below), so even a small
+# generation test retrieves against the full set of distractor paragraphs.
+# Source paragraphs provide POSITIVE relevance labels only -- not an
+# exhaustive judgment that every other paragraph was checked and found
+# irrelevant. These experiments are NOT directly comparable to the official
+# SQuAD reading comprehension leaderboard (span extraction given the gold
+# paragraph, not corpus retrieval).
+dataset:
+  adapter: squad
+  params:
+    dataset_path: data/squad/dev-v1.1.json
+    limit: 5
+
+chunking:
+  strategy: fixed_tokens
+  params:
+    chunk_size: 256
+    overlap: 32
+
+embedding:
+  strategy: sentence_transformer
+  params:
+    model_name: BAAI/bge-base-en-v1.5
+    batch_size: 32
+    device: cpu
+    query_prompt: "Represent this sentence for searching relevant passages: "
+  cache:
+    enabled: true
+    directory: .cache/embeddings
+    force_recompute: false
+
+indexing:
+  dense:
+    strategy: faiss
+    params: {}
+
+retrieval:
+  strategy: dense
+  top_k: 10
+  params: {}
+
+reranking:
+  strategy: none
+  final_k: 5
+  params: {}
+
+evaluation:
+  k_values: [1, 5, 10]
+  answer_metrics:
+      - strategy: nli
+        params:
+          model_name: facebook/bart-large-mnli
+          device: cpu
+          comparison: context     # groundedness via NLI
+      - strategy: llm_judge
+        params:
+          provider: huggingface
+          model_name: Qwen/Qwen2.5-1.5B-Instruct  # e.g. Qwen/Qwen2.5-0.5B-Instruct
+          device: cpu
+          max_new_tokens: 256
+          do_sample: false
+
+output:
+  directory: results
+
+# Requires: pip install -e ".[nli]" (covers transformers for both local
+# generation and context NLI below) -- purely local, no network calls or
+# API keys needed once the model is cached.
+generation:
+  enabled: true
+  provider: huggingface
+  params:
+    model_name: Qwen/Qwen2.5-1.5B-Instruct  # e.g. Qwen/Qwen2.5-0.5B-Instruct
+    device: cpu
+    max_new_tokens: 256
+    do_sample: false

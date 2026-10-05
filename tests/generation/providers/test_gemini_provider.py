@@ -1,4 +1,4 @@
-"""Unit tests for `GeminiGenerator`, using a fake `google.genai` module (no live API calls)."""
+"""Unit tests for `GeminiProvider`, using a fake `google.genai` module (no live API calls)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,7 @@ import types
 import pytest
 
 from rag_eval_lab.core.exceptions import ConfigurationError, GenerationError
-from rag_eval_lab.core.models import Chunk, Query, RetrievedChunk
-from rag_eval_lab.generation.gemini import GeminiGenerator
+from rag_eval_lab.generation.providers.gemini import GeminiProvider
 
 
 class _FakeModels:
@@ -79,44 +78,40 @@ def _make_response(
     return response
 
 
-def _make_query_and_chunks() -> tuple[Query, list[RetrievedChunk]]:
-    query = Query(id="q1", text="What is the capital of France?")
-    chunks = [
-        RetrievedChunk(
-            chunk=Chunk(id="c1", document_id="doc1", text="Paris is the capital of France."), score=0.9, rank=1
-        )
-    ]
-    return query, chunks
-
-
 def test_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_genai(monkeypatch, _make_response)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     with pytest.raises(ConfigurationError):
-        GeminiGenerator(model_name="gemini-test")
+        GeminiProvider(model_name="gemini-test")
 
 
 def test_missing_sdk_raises_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No fake `google.genai` installed here -- the real package genuinely
-    # isn't a dependency of this project's base install.
+    # No fake `google.genai` installed here -- this only tests something
+    # meaningful when the real optional dependency is actually absent.
     monkeypatch.delitem(sys.modules, "google.genai", raising=False)
     monkeypatch.delitem(sys.modules, "google", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
+    try:
+        import google.genai  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        pytest.skip("google-genai is installed in this environment; cannot exercise the missing-SDK path")
+
     with pytest.raises(ConfigurationError):
-        GeminiGenerator(model_name="gemini-test")
+        GeminiProvider(model_name="gemini-test")
 
 
 def test_reuses_one_client_across_multiple_generate_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     instances = _install_fake_genai(monkeypatch, _make_response)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    generator = GeminiGenerator(model_name="gemini-test")
-    query, chunks = _make_query_and_chunks()
+    provider = GeminiProvider(model_name="gemini-test")
 
-    generator.generate(query, chunks)
-    generator.generate(query, chunks)
+    provider.generate("prompt one")
+    provider.generate("prompt two")
 
     assert len(instances) == 1
     assert len(instances[0].models.calls) == 2
@@ -131,12 +126,10 @@ def test_returns_answer_text_and_metadata(monkeypatch: pytest.MonkeyPatch) -> No
     )
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    generator = GeminiGenerator(model_name="gemini-test")
-    query, chunks = _make_query_and_chunks()
+    provider = GeminiProvider(model_name="gemini-test")
+    text, metadata = provider.generate("What is the capital of France?")
 
-    answer, metadata = generator.generate(query, chunks)
-
-    assert answer == "Paris."
+    assert text == "Paris."
     assert metadata == {
         "provider": "gemini",
         "model_name": "gemini-test",
@@ -151,57 +144,57 @@ def test_metadata_never_contains_the_api_key(monkeypatch: pytest.MonkeyPatch) ->
     _install_fake_genai(monkeypatch, _make_response)
     monkeypatch.setenv("GEMINI_API_KEY", "super-secret-key")
 
-    generator = GeminiGenerator(model_name="gemini-test")
-    query, chunks = _make_query_and_chunks()
-
-    _, metadata = generator.generate(query, chunks)
+    provider = GeminiProvider(model_name="gemini-test")
+    _, metadata = provider.generate("prompt")
 
     assert "super-secret-key" not in str(metadata)
     assert "api_key" not in metadata
 
 
-def test_prompt_sent_to_model_contains_question_and_chunk_label(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_genai(monkeypatch, _make_response)
+def test_without_response_schema_passes_temperature_and_max_output_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    instances = _install_fake_genai(monkeypatch, _make_response)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    generator = GeminiGenerator(model_name="gemini-test")
-    query, chunks = _make_query_and_chunks()
-    generator.generate(query, chunks)
+    provider = GeminiProvider(model_name="gemini-test", temperature=0.2, max_output_tokens=256)
+    provider.generate("prompt")
 
-    call = generator._client.models.calls[0]
-    assert query.text in call["contents"]
-    assert chunks[0].chunk.id in call["contents"]
-
-
-def test_constructor_passes_temperature_and_max_output_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_genai(monkeypatch, _make_response)
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-
-    generator = GeminiGenerator(model_name="gemini-test", temperature=0.2, max_output_tokens=256)
-    query, chunks = _make_query_and_chunks()
-    generator.generate(query, chunks)
-
-    call = generator._client.models.calls[0]
+    call = instances[0].models.calls[0]
     assert call["config"]["temperature"] == 0.2
     assert call["config"]["max_output_tokens"] == 256
+    assert "response_schema" not in call["config"]
+
+
+def test_with_response_schema_requests_native_json_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    instances = _install_fake_genai(monkeypatch, _make_response)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    class _Schema:
+        pass
+
+    provider = GeminiProvider(model_name="gemini-test")
+    provider.generate("prompt", _Schema)
+
+    call = instances[0].models.calls[0]
+    assert call["config"]["response_mime_type"] == "application/json"
+    assert call["config"]["response_schema"] is _Schema
+    assert "max_output_tokens" not in call["config"]
 
 
 def test_raises_generation_error_when_response_has_no_text(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_genai(monkeypatch, lambda: _make_response(text=""))
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    generator = GeminiGenerator(model_name="gemini-test")
-    query, chunks = _make_query_and_chunks()
+    provider = GeminiProvider(model_name="gemini-test")
 
     with pytest.raises(GenerationError):
-        generator.generate(query, chunks)
+        provider.generate("prompt")
 
 
 def test_close_closes_the_underlying_client(monkeypatch: pytest.MonkeyPatch) -> None:
     instances = _install_fake_genai(monkeypatch, _make_response)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
 
-    generator = GeminiGenerator(model_name="gemini-test")
-    generator.close()
+    provider = GeminiProvider(model_name="gemini-test")
+    provider.close()
 
     assert instances[0].closed is True

@@ -9,7 +9,7 @@ See [copilot.md](copilot.md) for the full phased architecture plan.
 
 Phase 0 — core contracts (`models`, `protocols`, `registry`, `exceptions`) are in place.
 Phase 1 — generic ingestion (`txt`, `markdown`, `jsonl` loaders) is in place.
-Phase 2 — dataset and ground truth layer (`custom`, `beir` adapters) is in place.
+Phase 2 — dataset and ground truth layer (`custom`, `beir`, `squad` adapters) is in place.
 Phase 3 — file processing placeholder (see [file_processing/README.md](src/rag_eval_lab/file_processing/README.md)) is in place.
 Phase 4 — chunking strategy layer (`fixed_tokens`, `recursive`) is in place.
 Phase 5 — embedding and indexing (`sentence_transformer` embedding, `faiss`/`bm25` indexes) is in place.
@@ -17,7 +17,8 @@ Phase 6 — retrieval strategies (`dense`, `bm25`, `hybrid` with RRF fusion) is 
 Phase 7 — reranking strategies (`none`, `cross_encoder`) is in place.
 Phase 8 — retrieval evaluation engine (automatic metric selection from ground truth capabilities) is in place.
 Phase 9 — experiment configuration and runner (YAML configs, `ExperimentRunner`, JSON `ResultStore`, CLI) is in place.
-Phase 11 — optional answer generation (`gemini`/`openai` providers, disabled by default) is in place.
+Phase 11 — optional answer generation (`gemini`/`openai`/`huggingface` providers, disabled by default) is in place.
+Phase 12 — optional answer evaluation (`nli`, `llm_judge` evaluators, disabled by default) is in place.
 Before/after comparison reports and SQLite storage are intentionally deferred to Phase 10.
 
 ## Usage
@@ -65,6 +66,67 @@ evaluation_cases = beir.evaluation_cases()
 
 Both adapters expose the same `documents()` / `evaluation_cases()` shape;
 downstream code never needs to know which adapter produced them.
+
+#### SQuAD adapter
+
+Download the official SQuAD 1.1 dev set (~4.8MB; creates the directory and
+skips the download if the file already exists; falls back to the raw GitHub
+mirror if the primary endpoint fails):
+
+```powershell
+$ProgressPreference = 'SilentlyContinue'
+New-Item -ItemType Directory -Force -Path data\squad | Out-Null
+if (-not (Test-Path data\squad\dev-v1.1.json)) {
+  try {
+    Invoke-WebRequest -Uri "https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v1.1.json" `
+      -OutFile data\squad\dev-v1.1.json -TimeoutSec 60
+  } catch {
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rajpurkar/SQuAD-explorer/master/dataset/dev-v1.1.json" `
+      -OutFile data\squad\dev-v1.1.json -TimeoutSec 60
+  }
+}
+```
+
+`data/` is gitignored, so downloaded dataset files (SQuAD, SciFact) are
+never committed.
+
+```python
+from rag_eval_lab.datasets import dataset_registry
+
+# limit trims evaluation_cases() (first N questions in file order); the
+# shared corpus always contains every paragraph in the file regardless.
+squad = dataset_registry.create(
+    "squad",
+    dataset_path="data/squad/dev-v1.1.json",
+    limit=50,
+)
+documents = squad.documents()
+evaluation_cases = squad.evaluation_cases()
+```
+
+`SquadDatasetAdapter` reads the nested `data -> articles -> paragraphs -> qas`
+structure: article `title` → `Document.metadata`, paragraph `context` →
+`Document.text`, QA `id`/`question` → the `EvaluationCase`, the paragraph's
+own id → `document_relevance` with grade `1`, and the first annotated answer
+text → `reference_answer` (the current answer evaluators use one reference
+answer only; alternatives are never concatenated into it). All unique
+annotated answer texts are kept as
+`ground_truth.metadata["reference_answer_alternatives"]`. Answer spans never
+populate `evidence_texts` (an answer span is not necessarily sufficient
+supporting evidence), and no answers or relevance labels ever reach
+`Document.metadata`. Paragraphs are deduplicated by exact article title
+**and** context text (document ids are a deterministic SHA256 hash of both),
+and the shared corpus is built from **every** paragraph in the file
+independent of `limit` — so even a small generation test still retrieves
+against realistic distractors, not just the paragraphs its own (limited)
+questions happen to reference.
+
+Source paragraphs provide **positive** relevance labels only — not an
+exhaustive judgment that every other paragraph was checked and found
+irrelevant — and SQuAD answers are often short spans, so reference-mode NLI
+tends to be less informative than context-mode NLI here. These experiments
+are a custom reduced retrieval setup and are **not** directly comparable to
+the official SQuAD reading comprehension leaderboard.
 
 ### Chunking
 
@@ -458,6 +520,181 @@ experiments never require either installed. The client is built once and
 closed after the experiment via `generation.close_generator` (a small
 helper, not part of the shared `GenerationStrategy` protocol, since not
 every provider needs explicit cleanup).
+
+#### Local Hugging Face generation
+
+`provider: huggingface` runs a local instruction-tuned causal LM with
+Transformers instead of a hosted API — no network calls or API keys, once
+the model weights are cached:
+
+```powershell
+pip install -e ".[nli]"   # covers transformers (shared with the nli evaluator)
+```
+
+```yaml
+generation:
+  enabled: true
+  provider: huggingface
+  params:
+    model_name: YOUR_LOCAL_INSTRUCTION_MODEL_ID  # e.g. Qwen/Qwen2.5-0.5B-Instruct
+    device: cpu
+    max_new_tokens: 256
+    do_sample: false
+```
+
+`HuggingFaceGenerator` loads the tokenizer and model once per instance
+(`AutoTokenizer`/`AutoModelForCausalLM`, imported lazily so retrieval-only
+experiments never need `transformers` installed) and reuses them across
+every query. It builds the same RAG prompt (`generation.build_prompt`) as
+every other provider, applies the model's chat template as a single `user`
+message (for compatibility with models that reject a system role), generates
+under `torch.inference_mode()`, and decodes only the newly generated tokens
+(the prompt is excluded from the output by slicing past the input length —
+never re-parsed out of the decoded text). The tokenized prompt is checked
+against the tokenizer's `model_max_length` with room left for
+`max_new_tokens`; it raises `GenerationError` rather than silently
+truncating context if it doesn't fit. `temperature` is only passed through
+to `generate()` (and only recorded in metadata) when `do_sample: true`.
+Metadata is plain JSON: `provider`, `model_name`, `input_token_count`,
+`output_token_count`, `do_sample`, `max_new_tokens`, and `temperature` when
+sampling. No hosted inference, quantization, streaming, or automatic model
+selection are implemented.
+
+See [configs/experiment_squad_local_generation_example.yaml](configs/experiment_squad_local_generation_example.yaml)
+for a full runnable example: SQuAD (small `limit`), local Hugging Face
+generation, and context-mode NLI — the Gemini judge is intentionally left
+out of that example (its API quota is currently exhausted); add a
+`llm_judge` entry back once quota is restored.
+
+### Answer evaluation (optional, Phase 12)
+
+Unlike retrieval metrics (selected automatically from ground truth
+capabilities), answer evaluators are explicitly listed and default to
+none configured -- i.e. disabled:
+
+```yaml
+evaluation:
+  k_values: [1, 5, 10]
+  answer_metrics:
+    - strategy: nli
+      params:
+        model_name: facebook/bart-large-mnli
+        device: cpu
+        comparison: reference   # or: context
+    - strategy: llm_judge
+      params:
+        provider: gemini
+        model_name: REPLACE_WITH_YOUR_GEMINI_MODEL_ID
+        temperature: 0.0
+```
+
+`answer_metrics` is a plain list, so the same strategy can appear more than
+once with different `params` (e.g. both `comparison: reference` and
+`comparison: context` NLI entries, as above). Each entry is resolved through
+`evaluation.answer.answer_evaluator_registry` (currently `"nli"` and
+`"llm_judge"`) and constructed once per experiment, reused across every
+query — the runner never branches on evaluator name. An evaluator only runs
+on a sample when its declared `required_inputs` are actually available
+(`generated_answer`, and `reference_answer` and/or `retrieved_context`
+depending on the evaluator); a missing generated answer always means answer
+evaluation is skipped for that sample, reference comparisons additionally
+need a `reference_answer` in the ground truth, and context comparisons need
+retrieved chunks. Skipped metrics are simply absent, never reported as
+zero or fabricated.
+
+See
+[configs/experiment_answer_evaluation_example.yaml](configs/experiment_answer_evaluation_example.yaml)
+for a full runnable config, paired with a small committed example dataset at
+[configs/custom_example/](configs/custom_example/) that includes
+`reference_answer`s (SciFact has none, so with that dataset only
+context-based NLI and judge faithfulness/relevance run — reference-based NLI
+and judge correctness are skipped, not reported as zero).
+
+`NliAnswerEvaluator` (`evaluation/answer/entailment.py`) wraps a
+three-label Hugging Face sequence classification model: the premise is
+either the reference answer or the concatenated final retrieved chunk
+texts, the hypothesis is the generated answer, tokenized as a text pair and
+classified; entailment/contradiction/neutral labels are resolved from the
+model's own `config.id2label` (never assumed numeric positions), and the
+model's input limit is respected (long inputs are truncated, recorded as
+`metadata["truncated"]`). This is whole-answer comparison, not claim-level
+verification. Returns `answer_nli_{reference,context}_{entailment,contradiction,neutral}`.
+`transformers` is optional (the `nli` extra) and imported lazily, so
+retrieval-only experiments need no NLI model dependencies or downloads:
+`pip install -e ".[nli]"`.
+
+`GeminiJudgeEvaluator` (`evaluation/answer/llm_judge.py`) reuses the Phase 11
+Gemini conventions (lazy SDK import, `GEMINI_API_KEY` from the environment,
+one client per instance reused across every sample) and sends the question,
+generated answer, final retrieved context, and reference answer (only when
+available) as material to evaluate — never as instructions, with no web
+search or grounding. One API call per sample uses the current google-genai
+structured output API (`response_mime_type: application/json` plus a
+`response_schema`, selected by whether a reference answer is available: one
+schema has `faithfulness`/`relevance`, the other adds `correctness`); the
+returned JSON is then independently validated with Pydantic v2 (used only at
+this external response boundary — internal models stay stdlib dataclasses).
+Each criterion must be a strict integer 0-4 (booleans rejected) with a
+required, nonempty explanation; **schema validation enforces response
+structure, not judgment accuracy** — a well-formed `{"score": 4, ...}` is
+always accepted regardless of whether the score itself is a *good* judgment.
+A malformed response, a missing criterion, or a score/explanation that fails
+validation raises `GenerationError` rather than becoming a zero score (no
+retry framework).
+
+The rubric (`v2`) scores each criterion 0 (worst) to 4 (best) against fixed
+behavioral anchors, documented in full in `llm_judge.py`:
+
+- **Faithfulness** (support from retrieved context): 0 — central answer
+  contradicts the context or is entirely unsupported; 1 — most substantive
+  claims unsupported/contradicted; 2 — a mixture of supported and
+  unsupported substantive claims; 3 — all central claims supported, minor
+  unsupported details; 4 — all substantive claims supported, no
+  contradictions.
+- **Relevance** (addressing the question): 0 — does not address the
+  question; 1 — mostly unrelated or avoids answering; 2 — addresses part of
+  the question but misses major requested elements; 3 — addresses the main
+  question with minor omissions/distractions; 4 — directly addresses all
+  requested elements without material distractions.
+- **Correctness** (agreement with the reference, only scored when one
+  exists): 0 — conflicts with the reference or no substantive answer; 1 —
+  major factual errors with little correct information; 2 — partially
+  correct with a major error/omission; 3 — correct on the main points with a
+  minor error/omission; 4 — correct and complete relative to the question
+  and reference.
+
+Equivalent paraphrases are accepted; verbosity, writing style, and
+word-for-word matching are never rewarded. Facts the reference doesn't cover
+are treated as unknown, not automatically false (their *context* support is
+still assessed under faithfulness). An explicit abstention ("I don't know")
+scores faithfulness 4 only if the context genuinely cannot answer the
+question (otherwise 0, for an unjustified claim of insufficiency), relevance
+2 if it clearly acknowledges the inability to answer, and correctness 0 when
+the reference has a substantive answer. Scores are normalized to 0-1 in
+`MetricResult.value` (`score / 4`). Returns `answer_judge_faithfulness` and
+`answer_judge_relevance` always, plus `answer_judge_correctness` only when a
+reference answer is available. Metric metadata records `provider`,
+`model_name`, `rubric_version`, the raw integer `score`, the `explanation`,
+and available token usage — never the API key. `pydantic` lives in the same
+optional `generation` extra as `google-genai` and is imported lazily inside
+the evaluator's constructor, so retrieval-only experiments never require it.
+
+`EvaluationEngine(k_values=..., answer_evaluators=...)` combines the
+automatically-selected retrieval metrics with applicable answer evaluator
+results; answer metrics always use `k=None`, and aggregation by
+`(metric name, k)` is unchanged. `answer_evaluation_seconds` (cumulative
+across all samples) is recorded separately in `ExperimentResult.timings`,
+alongside the existing `evaluation_seconds` which still times the whole
+evaluation step as before. Per-query answer metric results — `query_id`,
+`name`, `value`, and `metadata` — are saved under
+`ExperimentResult.metadata["answer_metric_records"]`; averaged values stay
+in `ExperimentResult.metrics` like every other metric. The full evaluator
+configuration (model names, `comparison` mode, rubric) is saved verbatim in
+`ExperimentResult.config` — when comparing experiments, keep the same NLI
+model/comparison mode and the same judge model/rubric version, otherwise the
+comparison is not apples-to-apples. Evaluators are closed after the
+experiment via `evaluation.answer.close_evaluator`, the same kind of small
+lifecycle helper as `generation.close_generator`.
 
 ## Development
 

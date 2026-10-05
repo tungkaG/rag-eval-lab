@@ -253,25 +253,32 @@ reranking:
         ExperimentRunner(result_store=JsonResultStore(tmp_path / "results")).run(config)
 
 
-def _fake_generator_factory():
-    """Returns (factory, instances) -- mirrors the `_CallCounter`/factory pattern used elsewhere."""
-    instances: list = []
+def _fake_provider_factory():
+    """Returns (factory, instances) for a fake `LlmProvider` -- mirrors the factory pattern used elsewhere.
 
-    class _FakeGenerator:
+    `RagGenerator` only passes the built RAG prompt (not the query/chunks) to
+    the provider, so the fake recovers the query id from the question text
+    that `build_prompt` embeds in the prompt.
+    """
+    instances: list = []
+    question_to_query_id = {record["question"]: record["query_id"] for record in _EVALUATION_RECORDS}
+
+    class _FakeProvider:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
-            self.calls: list[tuple[str, list[str]]] = []
+            self.calls: list[str] = []
             self.closed = False
             instances.append(self)
 
-        def generate(self, query, retrieved_chunks):
-            self.calls.append((query.id, [result.chunk.id for result in retrieved_chunks]))
-            return f"answer-for-{query.id}", {"provider": "fake", "model_name": self.kwargs.get("model_name")}
+        def generate(self, prompt: str, response_schema: type | None = None):
+            self.calls.append(prompt)
+            query_id = next(qid for question, qid in question_to_query_id.items() if question in prompt)
+            return f"answer-for-{query_id}", {"provider": "fake", "model_name": self.kwargs.get("model_name")}
 
         def close(self) -> None:
             self.closed = True
 
-    return _FakeGenerator, instances
+    return _FakeProvider, instances
 
 
 def test_generation_disabled_by_default_leaves_no_generation_metadata_or_timings(bm25_config) -> None:
@@ -291,10 +298,10 @@ def test_generation_enabled_populates_answers_timings_and_records(
     from dataclasses import replace
 
     from rag_eval_lab.experiments.config import GenerationConfig
-    from rag_eval_lab.generation.registry import generation_registry
+    from rag_eval_lab.generation.providers.registry import provider_registry
 
-    factory, instances = _fake_generator_factory()
-    monkeypatch.setitem(generation_registry._factories, "fake_gemini", factory)
+    factory, instances = _fake_provider_factory()
+    monkeypatch.setitem(provider_registry._factories, "fake_gemini", factory)
 
     generation_config = GenerationConfig(enabled=True, provider="fake_gemini", params={"model_name": "fake-model"})
     config_with_generation = replace(config, generation=generation_config)
@@ -315,11 +322,63 @@ def test_generation_enabled_populates_answers_timings_and_records(
             "query_id",
             "question",
             "generated_answer",
+            "reference_answer",
             "context_chunk_ids",
             "generation_metadata",
             "generation_seconds",
         }
         assert record["generated_answer"] == f"answer-for-{record['query_id']}"
+        assert record["reference_answer"] is None  # bm25_config ground truth has no reference answer
 
     # Existing retrieval metrics are still computed alongside generation.
     assert any(metric.name == "document_hit_rate" for metric in result.metrics)
+
+
+def test_answer_evaluation_enabled_records_per_query_results_and_closes_evaluator(
+    bm25_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, results_dir = bm25_config
+
+    from dataclasses import replace
+
+    from rag_eval_lab.core.models import MetricResult
+    from rag_eval_lab.evaluation.answer.registry import answer_evaluator_registry
+    from rag_eval_lab.experiments.config import GenerationConfig, StrategyConfig
+    from rag_eval_lab.generation.providers.registry import provider_registry
+
+    provider_factory, _ = _fake_provider_factory()
+    monkeypatch.setitem(provider_registry._factories, "fake_gemini", provider_factory)
+
+    instances: list = []
+
+    class _FakeAnswerEvaluator:
+        required_inputs = {"generated_answer"}
+
+        def __init__(self, **kwargs: object) -> None:
+            self.closed = False
+            instances.append(self)
+
+        def evaluate(self, sample):
+            return [MetricResult(name="answer_fake_metric", value=1.0, k=None, metadata={"note": "fake"})]
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setitem(answer_evaluator_registry._factories, "fake_evaluator", _FakeAnswerEvaluator)
+
+    config_with_answer_eval = replace(
+        config,
+        generation=GenerationConfig(enabled=True, provider="fake_gemini", params={"model_name": "fake-model"}),
+        evaluation=replace(config.evaluation, answer_metrics=[StrategyConfig(strategy="fake_evaluator")]),
+    )
+
+    result = ExperimentRunner(result_store=JsonResultStore(results_dir)).run(config_with_answer_eval)
+
+    assert len(instances) == 1  # constructed once, reused across both queries
+    assert instances[0].closed is True
+    assert "answer_evaluation_seconds" in result.timings
+
+    records = result.metadata["answer_metric_records"]
+    assert len(records) == 2  # one per evaluation case
+    assert all(record["name"] == "answer_fake_metric" for record in records)
+    assert all(record["metadata"] == {"note": "fake"} for record in records)

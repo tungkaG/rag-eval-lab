@@ -1406,6 +1406,18 @@ through provider branches. `google-genai`, `openai`, and `python-dotenv` are
 all optional dependencies (the `generation` extra in `pyproject.toml`):
 `pip install -e ".[generation]"`.
 
+`HuggingFaceGenerator(model_name, device="cpu", max_new_tokens=256, do_sample=False, temperature=None)`
+runs a local instruction-tuned causal LM via `transformers`
+(`AutoTokenizer`/`AutoModelForCausalLM`, lazily imported -- the `nli`
+extra), loading both once per instance and reusing them across every
+`generate()` call. Applies the model's chat template with a single `user`
+message, generates under `torch.inference_mode()`, and decodes only the
+newly generated tokens (sliced past the input length). Checks the tokenized
+prompt plus `max_new_tokens` against the tokenizer's `model_max_length`,
+raising `GenerationError` instead of silently truncating context.
+`temperature` is only passed to `generate()` when `do_sample=True`.
+Registered as `"huggingface"` in `generation_registry`, same as the others.
+
 ## Configuration
 
 ```yaml
@@ -1428,7 +1440,6 @@ generation:
 Missing the `generation` section, or `enabled: false`, both mean disabled;
 `provider` and `params.model_name` are only required when `enabled: true`.
 See [configs/experiment_generation_example.yaml](configs/experiment_generation_example.yaml)
-and [configs/experiment_generation_example_openai.yaml](configs/experiment_generation_example_openai.yaml).
 
 ## Runner integration
 
@@ -1453,93 +1464,150 @@ Retrieval experiments remain possible without an LLM.
 Generation is completely optional.
 
 
-# Phase 12, Answer Evaluation
+# Phase 12, Answer Evaluation (implemented, lean scope)
 
 ## Objective
 
-Use answer ground truth when available.
+Use answer ground truth when available. Implemented leanly with only NLI
+comparison and a Gemini LLM judge -- exact match, token F1, keyword metrics,
+sentence similarity, and BERTScore were explicitly skipped for this phase.
 
-## Create
+## Created
 
 ```text
 src/rag_eval_lab/evaluation/answer/
-    exact_match.py
-    token_f1.py
-    keyword_metrics.py
-    semantic_similarity.py
+    __init__.py
+    base.py
+    registry.py
     entailment.py
     llm_judge.py
 ```
 
-## Initial deterministic metrics
+A new `AnswerEvaluator` protocol (`evaluate(sample) -> list[MetricResult]`,
+`base.py`) and its own `answer_evaluator_registry` (`registry.py`) -- kept
+separate from the retrieval `Metric` protocol/`metric_registry` because
+applicability depends on `EvaluationSample`-level inputs (generated answer,
+reference answer, retrieved context), not `GroundTruth` capabilities.
+`required_inputs: set[AnswerEvaluationInput]` on each evaluator (a literal
+of `"generated_answer"`/`"reference_answer"`/`"retrieved_context"`) lets
+`base.is_applicable()` check applicability without inspecting strategy
+names, mirroring how the planner already does this for retrieval metrics.
 
-Implement first:
+## Configuration
 
-```text
-Exact Match
+Retrieval metrics are still selected automatically, unchanged. Answer
+evaluators require explicit configuration and default to disabled (an empty
+`answer_metrics` list):
 
-Token F1
-
-Keyword Precision
-
-Keyword Recall
+```yaml
+evaluation:
+  k_values: [1, 5, 10]
+  answer_metrics:
+    - strategy: nli
+      params:
+        model_name: facebook/bart-large-mnli
+        device: cpu
+        comparison: reference   # or: context
+    - strategy: llm_judge
+      params:
+        provider: gemini
+        model_name: REPLACE_WITH_YOUR_GEMINI_MODEL_ID
+        temperature: 0.0
 ```
 
-## Semantic metrics
+`answer_metrics` is a plain list of `strategy`/`params` entries (the same
+`StrategyConfig` shape used everywhere else) so the same strategy can appear
+more than once with different `params` -- e.g. both `comparison: reference`
+and `comparison: context` NLI entries. A missing generated answer always
+means answer evaluation is skipped for that sample; reference comparisons
+additionally require a reference answer; context comparisons require
+retrieved context. Nothing is fabricated or reported as zero when skipped.
+See [configs/experiment_answer_evaluation_example.yaml](configs/experiment_answer_evaluation_example.yaml)
+and the small committed example dataset at
+[configs/custom_example/](configs/custom_example/) (has `reference_answer`s,
+unlike SciFact). With the current SciFact adapter, only context-based NLI
+and judge faithfulness/relevance run; reference-based NLI and judge
+correctness are skipped since SciFact has no reference answers.
 
-Then:
+## NLI evaluator
 
-```text
-Sentence embedding similarity
+`NliAnswerEvaluator` wraps a three-label Hugging Face sequence
+classification model (`AutoTokenizer`/`AutoModelForSequenceClassification`,
+imported lazily -- `transformers` is the optional `nli` extra). Reference
+mode: reference answer is the premise, generated answer the hypothesis.
+Context mode: concatenated final retrieved chunk texts are the premise.
+Tokenized as a text pair, softmax applied to the logits. Entailment,
+contradiction, and neutral label indices are resolved from the model's own
+`config.id2label` (never assumed numeric positions); a model without
+exactly those three labels raises `ConfigurationError` at construction.
+Returns `answer_nli_{reference,context}_{entailment,contradiction,neutral}`,
+with `model_name`, `comparison`, and `truncated` (whether the model's input
+limit cut off the premise/hypothesis) in metric metadata. This is
+whole-answer comparison, not claim-level verification.
 
-BERTScore if useful
-```
+## Gemini judge (rubric v2, Pydantic-validated)
 
-## Entailment
+`GeminiJudgeEvaluator` reuses the Phase 11 Gemini conventions (lazy SDK
+import, `GEMINI_API_KEY` from the environment via `core.env.load_env_file`,
+one client per instance reused across every sample). Sends the question,
+generated answer, final retrieved context, and reference answer (only when
+available) as material to evaluate -- never as instructions; no web search
+or external grounding. One `generate_content` call per sample uses the
+current google-genai structured output API (`response_mime_type:
+application/json` + `response_schema`, a lazily-built Pydantic v2 model
+selected by reference availability: `faithfulness`/`relevance` without a
+reference, plus `correctness` with one); the returned JSON is independently
+validated via `schema.model_validate_json(...)`. Each criterion is a
+`StrictInt` 0-4 (rejects bools) with a required nonempty `explanation`
+(`pydantic.ValidationError` -> `GenerationError`, covering malformed JSON,
+missing criteria, out-of-range/wrong-type scores, and blank explanations in
+one place) -- schema validation enforces response STRUCTURE, not judgment
+accuracy. Pydantic is imported lazily inside `__init__`/`_build_schemas()`
+(same `generation` extra as google-genai), so retrieval-only imports of this
+module never require it.
 
-Add NLI based comparison.
+Rubric `v2` (bumped from `v1` since scoring behavior changed) gives each
+criterion explicit 0-4 behavioral anchors (see `llm_judge.py` for the exact
+wording): faithfulness (context support), relevance (addressing the
+question), correctness (agreement with the reference). Equivalent
+paraphrases accepted; verbosity/style/word-for-word matching never
+rewarded; facts the reference doesn't cover are "unknown", not
+automatically false (still assessed under faithfulness). Explicit
+abstentions: faithfulness 4 only if the context truly can't answer
+(otherwise 0), relevance 2 if it clearly acknowledges inability to answer,
+correctness 0 when the reference has a substantive answer. Scores
+normalized to 0-1 (`score / 4`) in `MetricResult.value`. Returns
+`answer_judge_faithfulness`/`answer_judge_relevance` always,
+`answer_judge_correctness` only with a reference. Metadata: `provider`,
+`model_name`, `rubric_version`, the raw integer `score`, `explanation`,
+available token usage -- never the API key or raw SDK response. Only
+`provider: gemini` is supported in this phase (`ConfigurationError`
+otherwise); no other judge providers were added.
 
-This should help distinguish semantic equivalence from vocabulary similarity.
+## Runner integration
 
-## LLM judge
-
-Add last.
-
-LLM judging should be optional because it introduces:
-
-```text
-cost
-
-latency
-
-nondeterminism
-
-provider dependency
-```
-
-Use structured scoring rather than free form judging.
-
-## Automatic metric selection
-
-If:
-
-```text
-ANSWER_GT = false
-```
-
-answer metrics are skipped.
-
-If:
-
-```text
-ANSWER_GT = true
-```
-
-applicable answer metrics are enabled.
+`EvaluationEngine(k_values=..., answer_evaluators=...)` combines the
+existing automatically-selected retrieval metrics with applicable answer
+evaluator results in one `evaluate()` call; answer metrics always use
+`k=None`, preserving aggregation by `(name, k)`. Evaluators are built once
+per experiment via `answer_evaluator_registry` and reused across every
+query -- no per-sample model loads or client creation. `answer_evaluation_seconds`
+accumulates on the engine itself and is recorded separately in
+`ExperimentResult.timings` (alongside the unchanged `evaluation_seconds`,
+which still times the whole evaluation step as before). Per-query answer
+metric results (`query_id`, `name`, `value`, `metadata`) are saved under
+`ExperimentResult.metadata["answer_metric_records"]`; averaged values stay
+in `ExperimentResult.metrics` like every other metric. The evaluator
+configuration is saved verbatim in `ExperimentResult.config` (the full
+parsed YAML) -- compare experiments only when they share the same NLI
+model/comparison mode and the same judge model/rubric version. Evaluators
+are closed in a `finally` block via `evaluation.answer.close_evaluator`, the
+same kind of lifecycle helper as `generation.close_generator`.
 
 ## Acceptance criteria
 
-The same evaluation engine handles retrieval and answer evaluation based purely on available capabilities.
+The same evaluation engine handles retrieval and answer evaluation based
+purely on available capabilities/inputs.
 
 
 # Phase 13, Evidence and Claim Evaluation

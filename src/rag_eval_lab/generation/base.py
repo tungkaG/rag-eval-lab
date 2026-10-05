@@ -1,8 +1,8 @@
 """Generation strategies all implement the shared `GenerationStrategy` protocol from core.
 
 `close_generator` is a small escape hatch for generators that hold a
-long-lived client (e.g. `GeminiGenerator`) without adding `close()` to the
-shared protocol itself.
+long-lived client (e.g. `RagGenerator`'s underlying provider) without adding
+`close()` to the shared protocol itself.
 """
 
 from __future__ import annotations

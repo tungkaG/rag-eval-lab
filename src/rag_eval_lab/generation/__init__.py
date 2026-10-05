@@ -1,16 +1,14 @@
 """Optional answer generation: disabled unless an experiment's YAML enables it."""
 
 from rag_eval_lab.generation.base import GenerationStrategy, close_generator
-from rag_eval_lab.generation.gemini import GeminiGenerator
-from rag_eval_lab.generation.openai import OpenAIGenerator
+from rag_eval_lab.generation.generator import RagGenerator
 from rag_eval_lab.generation.prompt_builder import build_prompt
-from rag_eval_lab.generation.registry import generation_registry
+from rag_eval_lab.generation.providers.registry import provider_registry
 
 __all__ = [
     "GenerationStrategy",
-    "GeminiGenerator",
-    "OpenAIGenerator",
+    "RagGenerator",
     "build_prompt",
     "close_generator",
-    "generation_registry",
+    "provider_registry",
 ]

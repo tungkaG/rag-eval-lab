@@ -20,7 +20,11 @@ embedding:
     batch_size: 32
     device: cpu
     query_prompt: "Represent this sentence for searching relevant passages: "
-
+  cache:
+    enabled: true
+    directory: .cache/embeddings
+    force_recompute: false
+    
 indexing:
   dense:
     strategy: faiss
@@ -49,6 +53,6 @@ generation:
   enabled: true
   provider: gemini
   params:
-    model_name: REPLACE_WITH_YOUR_GEMINI_MODEL_ID  # e.g. gemini-2.0-flash
+    model_name: gemini-2.5-flash  # e.g. gemini-2.0-flash
     temperature: 0.0
     max_output_tokens: 1024

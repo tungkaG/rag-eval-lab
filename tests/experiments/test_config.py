@@ -270,6 +270,37 @@ generation:
         load_config(_write(tmp_path, content))
 
 
+def test_answer_metrics_defaults_to_empty_list(tmp_path: Path) -> None:
+    config = load_config(_write(tmp_path, MINIMAL_VALID))
+
+    assert config.evaluation.answer_metrics == []
+
+
+def test_answer_metrics_parses_list_of_strategy_configs(tmp_path: Path) -> None:
+    content = (
+        MINIMAL_VALID
+        + """
+evaluation:
+  k_values: [1, 5]
+  answer_metrics:
+    - strategy: nli
+      params:
+        model_name: facebook/bart-large-mnli
+        comparison: reference
+    - strategy: llm_judge
+      params:
+        provider: gemini
+        model_name: gemini-test-model
+"""
+    )
+    config = load_config(_write(tmp_path, content))
+
+    assert len(config.evaluation.answer_metrics) == 2
+    assert config.evaluation.answer_metrics[0].strategy == "nli"
+    assert config.evaluation.answer_metrics[0].params["comparison"] == "reference"
+    assert config.evaluation.answer_metrics[1].strategy == "llm_judge"
+
+
 def test_non_positive_top_k_raises_configuration_error(tmp_path: Path) -> None:
     content = MINIMAL_VALID.replace("top_k: 50", "top_k: 0")
 

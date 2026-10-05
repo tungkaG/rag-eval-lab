@@ -99,9 +99,18 @@ class IndexingConfig:
 
 @dataclass(slots=True)
 class EvaluationConfig:
-    """`k_values` passed straight through to `EvaluationEngine`."""
+    """`k_values` passed straight through to `EvaluationEngine`.
+
+    `answer_metrics` is a list of `StrategyConfig`s (strategy + params), each
+    constructed once into an `AnswerEvaluator` via `answer_evaluator_registry`
+    -- unlike retrieval metrics (selected automatically from ground truth
+    capabilities), answer evaluators are only ever run when explicitly
+    listed here; an empty list (the default) means answer evaluation is
+    disabled.
+    """
 
     k_values: list[int] = field(default_factory=lambda: [1, 5, 10])
+    answer_metrics: list[StrategyConfig] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -115,9 +124,11 @@ class OutputConfig:
 class GenerationConfig:
     """Optional answer generation settings; disabled unless explicitly enabled.
 
-    `params` (e.g. `model_name`) is passed straight through to the registered
-    `generation_registry` strategy, the same way every other strategy's
-    `params` is -- no per-provider configuration class.
+    `provider` and `params` (e.g. `model_name`) are passed straight through
+    to `RagGenerator(provider=..., **params)`, which resolves `provider`
+    from the shared `generation.providers.provider_registry` -- no
+    per-provider configuration class, and no registry keyed by provider name
+    in `experiments`/`generation` itself.
     """
 
     enabled: bool = False
@@ -243,7 +254,15 @@ def _parse_config(raw: Any) -> ExperimentConfig:
     )
 
     evaluation_section = raw.get("evaluation") or {}
-    evaluation = EvaluationConfig(k_values=list(evaluation_section.get("k_values") or [1, 5, 10]))
+    answer_metrics_section = evaluation_section.get("answer_metrics") or []
+    answer_metrics = [
+        _strategy_config(item, f"evaluation.answer_metrics[{index}]")
+        for index, item in enumerate(answer_metrics_section)
+    ]
+    evaluation = EvaluationConfig(
+        k_values=list(evaluation_section.get("k_values") or [1, 5, 10]),
+        answer_metrics=answer_metrics,
+    )
 
     output_section = raw.get("output") or {}
     output = OutputConfig(directory=output_section.get("directory") or "results")

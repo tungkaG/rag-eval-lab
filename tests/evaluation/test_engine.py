@@ -48,3 +48,37 @@ def test_evaluate_uses_default_k_values():
     results = EvaluationEngine().evaluate(sample)
 
     assert {result.k for result in results} == {1, 5, 10}
+
+
+def test_evaluate_combines_retrieval_results_with_applicable_answer_evaluators():
+    from rag_eval_lab.core.models import MetricResult
+
+    class _FakeEvaluator:
+        required_inputs = {"generated_answer"}
+
+        def evaluate(self, sample):
+            return [MetricResult(name="answer_fake_metric", value=1.0, k=None)]
+
+    sample = _sample({"d1": 1}, ["d1"])
+    sample.generated_answer = "an answer"
+
+    engine = EvaluationEngine(k_values=[1], answer_evaluators=[_FakeEvaluator()])
+    results = engine.evaluate(sample)
+
+    assert any(result.name == "answer_fake_metric" for result in results)
+    assert engine.answer_evaluation_seconds >= 0.0
+
+
+def test_evaluate_skips_answer_evaluator_when_required_input_missing():
+    class _FakeEvaluator:
+        required_inputs = {"generated_answer"}
+
+        def evaluate(self, sample):
+            raise AssertionError("must not be called when generated_answer is missing")
+
+    sample = _sample({"d1": 1}, ["d1"])  # generated_answer stays None
+
+    engine = EvaluationEngine(k_values=[1], answer_evaluators=[_FakeEvaluator()])
+    results = engine.evaluate(sample)
+
+    assert all(not result.name.startswith("answer_") for result in results)

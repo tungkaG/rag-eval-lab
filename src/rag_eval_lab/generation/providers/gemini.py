@@ -1,7 +1,7 @@
-"""Gemini-backed `GenerationStrategy`, wrapping the `google-genai` SDK.
+"""Gemini-backed `LlmProvider`, wrapping the `google-genai` SDK.
 
 `google.genai` is an optional dependency (the `generation` extra) and is
-imported lazily, only when a `GeminiGenerator` is constructed -- so
+imported lazily, only when a `GeminiProvider` is constructed -- so
 retrieval-only experiments never need it installed.
 """
 
@@ -12,18 +12,20 @@ from typing import Any
 
 from rag_eval_lab.core.env import load_env_file
 from rag_eval_lab.core.exceptions import ConfigurationError, GenerationError
-from rag_eval_lab.core.models import Query, RetrievedChunk
-from rag_eval_lab.generation.prompt_builder import build_prompt
 
 _API_KEY_ENV_VAR = "GEMINI_API_KEY"
 
 
-class GeminiGenerator:
-    """Generates answers with the Gemini Developer API.
+class GeminiProvider:
+    """Runs prompts through the Gemini Developer API.
 
     Builds one `genai.Client` per instance in `__init__` and reuses it across
     every `generate()` call; call `close()` once after the experiment to
-    release it (see `generation.base.close_generator`).
+    release it (see `generation.providers.base.close_provider`).
+
+    Without a `response_schema`, mirrors plain-text answer generation
+    (`temperature`/`max_output_tokens`). With one, switches to Gemini's
+    native JSON response mode for LLM judging instead.
     """
 
     def __init__(self, model_name: str, temperature: float = 0.0, max_output_tokens: int = 1024) -> None:
@@ -31,7 +33,7 @@ class GeminiGenerator:
             from google import genai
         except ImportError as exc:
             raise ConfigurationError(
-                "google-genai is required for the 'gemini' generator; install it with "
+                "google-genai is required for the 'gemini' provider; install it with "
                 'pip install -e ".[generation]"'
             ) from exc
 
@@ -45,20 +47,21 @@ class GeminiGenerator:
         self.max_output_tokens = max_output_tokens
         self._client = genai.Client(api_key=api_key)
 
-    def generate(self, query: Query, retrieved_chunks: list[RetrievedChunk]) -> tuple[str, dict[str, Any]]:
-        prompt = build_prompt(query, retrieved_chunks)
+    def generate(self, prompt: str, response_schema: type | None = None) -> tuple[str, dict[str, Any]]:
+        config: dict[str, Any] = {"temperature": self.temperature}
+        if response_schema is not None:
+            config["response_mime_type"] = "application/json"
+            config["response_schema"] = response_schema
+        else:
+            config["max_output_tokens"] = self.max_output_tokens
 
-        response = self._client.models.generate_content(
-            model=self.model_name,
-            contents=prompt,
-            config={"temperature": self.temperature, "max_output_tokens": self.max_output_tokens},
-        )
+        response = self._client.models.generate_content(model=self.model_name, contents=prompt, config=config)
 
-        answer = getattr(response, "text", None)
-        if not answer or not answer.strip():
-            raise GenerationError("Gemini response contained no answer text")
+        text = getattr(response, "text", None)
+        if not text or not text.strip():
+            raise GenerationError("Gemini response contained no text")
 
-        return answer, self._response_metadata(response)
+        return text, self._response_metadata(response)
 
     def _response_metadata(self, response: Any) -> dict[str, Any]:
         metadata: dict[str, Any] = {"provider": "gemini", "model_name": self.model_name}
