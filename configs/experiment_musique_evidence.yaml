@@ -1,0 +1,57 @@
+experiment:
+  name: musique_evidence
+
+# Custom shared-corpus retrieval experiment, not an official MuSiQue score.
+dataset:
+  adapter: musique
+  params:
+    dataset_path: data/musique/validation.jsonl
+    limit: 50
+
+chunking:
+  strategy: fixed_tokens
+  params:
+    chunk_size: 512
+    overlap: 32
+
+embedding:
+  strategy: sentence_transformer
+  params:
+    model_name: BAAI/bge-base-en-v1.5
+    batch_size: 32
+    device: cpu
+    query_prompt: "Represent this sentence for searching relevant passages: "
+  cache:
+    enabled: true
+    directory: .cache/embeddings
+    force_recompute: false
+
+indexing:
+  dense:
+    strategy: faiss
+    params: {}
+
+retrieval:
+  strategy: dense
+  top_k: 50
+  params: {}
+
+reranking:
+  strategy: none
+  final_k: 10
+  params: {}
+
+evaluation:
+  k_values: [1, 5, 10]
+  answer_metrics: []
+  evidence_metrics:
+    matcher:
+      strategy: lexical
+      params: {}
+    threshold: 0.5  # Example experimental setting, not a universal cutoff.
+
+generation:
+  enabled: false
+
+output:
+  directory: results

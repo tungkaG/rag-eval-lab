@@ -276,6 +276,36 @@ def test_answer_metrics_defaults_to_empty_list(tmp_path: Path) -> None:
     assert config.evaluation.answer_metrics == []
 
 
+def test_evidence_metrics_default_to_disabled(tmp_path: Path) -> None:
+    config = load_config(_write(tmp_path, MINIMAL_VALID))
+
+    assert config.evaluation.evidence_metrics is None
+
+
+def test_evidence_metrics_parse_matcher_and_threshold(tmp_path: Path) -> None:
+    content = (
+        MINIMAL_VALID
+        + """
+evaluation:
+  k_values: [1, 5]
+  evidence_metrics:
+    matcher:
+      strategy: embedding
+      params:
+        embedding_strategy: sentence_transformer
+        embedding_params:
+          model_name: sentence-transformers/all-MiniLM-L6-v2
+    threshold: 0.8
+"""
+    )
+    config = load_config(_write(tmp_path, content))
+
+    assert config.evaluation.evidence_metrics is not None
+    assert config.evaluation.evidence_metrics.matcher.strategy == "embedding"
+    assert config.evaluation.evidence_metrics.matcher.params["embedding_strategy"] == "sentence_transformer"
+    assert config.evaluation.evidence_metrics.threshold == 0.8
+
+
 def test_answer_metrics_parses_list_of_strategy_configs(tmp_path: Path) -> None:
     content = (
         MINIMAL_VALID

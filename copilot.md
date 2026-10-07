@@ -1610,13 +1610,36 @@ The same evaluation engine handles retrieval and answer evaluation based
 purely on available capabilities/inputs.
 
 
-# Phase 13, Evidence and Claim Evaluation
+# Phase 13, Evidence Evaluation (implemented, lean scope)
 
 ## Objective
 
-Support benchmarks where explicit evidence or reference claims exist.
+Support benchmarks with explicit gold evidence texts. Claim evaluation remains
+deferred because the current ground-truth model has no explicit claims.
 
 ## Evidence metrics
+
+`evaluation.evidence_metrics` is explicitly configured and disabled by
+default. It builds one matcher per experiment through
+`evaluation.evidence.evidence_matcher_registry`, then reuses it across cases.
+The built-in `lexical` matcher uses lowercase word-token F1; `embedding`
+uses cosine similarity from an embedding strategy selected through the
+existing embedding registry. Each matcher returns one score matrix (retrieved
+chunk texts by gold evidence texts), calculated once per case for the largest
+configured `k` and reused for all cutoffs.
+
+At each `k`, evidence metrics use the first `k` final retrieved chunks in
+rank order without document deduplication. A score at least the configured
+threshold is a match. `evidence_recall` counts each gold evidence text at
+most once; `evidence_precision` divides matching chunks by the actual number
+of retrieved chunks considered. Cases without `evidence_texts` skip these
+metrics rather than reporting zeros. Metric metadata stores matcher,
+threshold, and embedding configuration where applicable. Matching remains a
+heuristic, not proof of claim support.
+
+Built-in matching and metrics are in `evaluation/evidence/{base,registry,
+matchers,metrics}.py`. New matchers implement/register the small
+`EvidenceMatcher` protocol; no runner or engine change is required.
 
 Compare retrieved chunks against gold evidence using:
 
@@ -1630,7 +1653,7 @@ evidence recall
 evidence precision
 ```
 
-## Claim metrics
+## Claim metrics (deferred)
 
 Normalize reference answers into claims when claim ground truth exists.
 

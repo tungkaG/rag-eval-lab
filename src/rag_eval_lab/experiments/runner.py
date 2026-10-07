@@ -39,6 +39,7 @@ from rag_eval_lab.core.protocols import ResultStore
 from rag_eval_lab.datasets.registry import dataset_registry
 from rag_eval_lab.evaluation.answer.base import close_evaluator
 from rag_eval_lab.evaluation.answer.registry import answer_evaluator_registry
+from rag_eval_lab.evaluation.evidence.registry import evidence_matcher_registry
 from rag_eval_lab.evaluation.engine import EvaluationEngine
 from rag_eval_lab.experiments.config import ExperimentConfig
 from rag_eval_lab.experiments.result_store import JsonResultStore
@@ -96,7 +97,21 @@ class ExperimentRunner:
             answer_evaluator_registry.create(item.strategy, **item.params)
             for item in config.evaluation.answer_metrics
         ]
-        evaluation_engine = EvaluationEngine(k_values=config.evaluation.k_values, answer_evaluators=answer_evaluators)
+        evidence_matcher = None
+        evidence_threshold = 0.0
+        if config.evaluation.evidence_metrics is not None:
+            evidence_config = config.evaluation.evidence_metrics
+            evidence_matcher = evidence_matcher_registry.create(
+                evidence_config.matcher.strategy,
+                **evidence_config.matcher.params,
+            )
+            evidence_threshold = evidence_config.threshold
+        evaluation_engine = EvaluationEngine(
+            k_values=config.evaluation.k_values,
+            answer_evaluators=answer_evaluators,
+            evidence_matcher=evidence_matcher,
+            evidence_threshold=evidence_threshold,
+        )
 
         generator = None
         if config.generation.enabled:
@@ -147,7 +162,8 @@ class ExperimentRunner:
 
                 started = perf_counter()
                 for metric_result in evaluation_engine.evaluate(sample):
-                    metric_values.setdefault((metric_result.name, metric_result.k), []).append(metric_result.value)
+                    metric_key = (metric_result.name, metric_result.k)
+                    metric_values.setdefault(metric_key, []).append(metric_result.value)
                     if metric_result.name.startswith("answer_"):
                         answer_metric_records.append(
                             {

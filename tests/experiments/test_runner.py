@@ -382,3 +382,51 @@ def test_answer_evaluation_enabled_records_per_query_results_and_closes_evaluato
     assert len(records) == 2  # one per evaluation case
     assert all(record["name"] == "answer_fake_metric" for record in records)
     assert all(record["metadata"] == {"note": "fake"} for record in records)
+
+
+def test_aggregate_metrics_drop_per_query_metadata_but_answer_records_preserve_it(
+    bm25_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, results_dir = bm25_config
+
+    from dataclasses import replace
+
+    from rag_eval_lab.core.models import MetricResult
+    from rag_eval_lab.evaluation.answer.registry import answer_evaluator_registry
+    from rag_eval_lab.experiments.config import GenerationConfig, StrategyConfig
+    from rag_eval_lab.generation.providers.registry import provider_registry
+
+    provider_factory, _ = _fake_provider_factory()
+    monkeypatch.setitem(provider_registry._factories, "fake_metadata_provider", provider_factory)
+
+    class _MetadataEvaluator:
+        required_inputs = {"generated_answer"}
+
+        def evaluate(self, sample):
+            query_id = sample.evaluation_case.query_id
+            return [
+                MetricResult(
+                    name="answer_metadata_metric",
+                    value=1.0,
+                    metadata={
+                        "explanation": f"explanation-{query_id}",
+                        "score": 4,
+                        "total_token_count": 10 if query_id == "q1" else 20,
+                    },
+                )
+            ]
+
+    monkeypatch.setitem(answer_evaluator_registry._factories, "metadata_evaluator", _MetadataEvaluator)
+    configured = replace(
+        config,
+        generation=GenerationConfig(enabled=True, provider="fake_metadata_provider", params={"model_name": "fake-model"}),
+        evaluation=replace(config.evaluation, answer_metrics=[StrategyConfig(strategy="metadata_evaluator")]),
+    )
+
+    result = ExperimentRunner(result_store=JsonResultStore(results_dir)).run(configured)
+
+    aggregate = next(metric for metric in result.metrics if metric.name == "answer_metadata_metric")
+    assert aggregate.metadata == {}
+    records = result.metadata["answer_metric_records"]
+    assert {record["metadata"]["explanation"] for record in records} == {"explanation-q1", "explanation-q2"}
+    assert {record["metadata"]["total_token_count"] for record in records} == {10, 20}

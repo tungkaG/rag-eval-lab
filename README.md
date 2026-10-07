@@ -19,6 +19,7 @@ Phase 8 — retrieval evaluation engine (automatic metric selection from ground 
 Phase 9 — experiment configuration and runner (YAML configs, `ExperimentRunner`, JSON `ResultStore`, CLI) is in place.
 Phase 11 — optional answer generation (`gemini`/`openai`/`huggingface` providers, disabled by default) is in place.
 Phase 12 — optional answer evaluation (`nli`, `llm_judge` evaluators, disabled by default) is in place.
+Phase 13 — optional evidence evaluation (`lexical`, `embedding` matchers, disabled by default) is in place.
 Before/after comparison reports and SQLite storage are intentionally deferred to Phase 10.
 
 ## Usage
@@ -127,6 +128,31 @@ irrelevant — and SQuAD answers are often short spans, so reference-mode NLI
 tends to be less informative than context-mode NLI here. These experiments
 are a custom reduced retrieval setup and are **not** directly comparable to
 the official SQuAD reading comprehension leaderboard.
+
+#### MuSiQue adapter
+
+`MusiqueDatasetAdapter` reads a local MuSiQue JSONL file; it never downloads
+data. It selects the first `limit` answerable records in file order and
+builds one shared corpus from every selected record's paragraphs, including
+distractors. Paragraphs are deduplicated by exact title and text with stable
+hash-based document IDs. Supporting paragraphs become positive document
+judgments and whole-paragraph `evidence_texts`; answer, support flags, and
+question decomposition never enter document metadata.
+
+The included configurations are custom shared-corpus MuSiQue retrieval
+experiments, not official benchmark scores. Their evidence matching compares
+whole supporting paragraphs, so a match is a retrieval heuristic rather than
+proof of multi-hop reasoning or claim support:
+
+```powershell
+& .venv\Scripts\python.exe -m rag_eval_lab.experiments configs/experiment_musique_evidence_lexical.yaml
+& .venv\Scripts\python.exe -m rag_eval_lab.experiments configs/experiment_musique_evidence_embedding.yaml
+```
+
+Both use the same dense retrieval configuration over the first 50 local
+answerable validation records with generation and answer metrics disabled.
+The lexical experiment uses token-F1 evidence matching; the embedding
+experiment additionally loads the configured evidence embedding model.
 
 ### Chunking
 
@@ -298,6 +324,66 @@ for a SciFact-style case (document relevance only) that automatically
 selects the five document metrics at each `k`; page metrics are added only
 when `page_references` are also present. No dataset adapter or metric
 contains BEIR-specific logic.
+
+#### Evidence metrics (optional, Phase 13)
+
+Evidence metrics are disabled unless `evaluation.evidence_metrics` is
+configured. They require manually supplied `ground_truth.evidence_texts`;
+cases without evidence simply emit no evidence metrics. They work with
+generation disabled.
+
+```yaml
+evaluation:
+  k_values: [1, 5, 10]
+  evidence_metrics:
+    matcher:
+      strategy: lexical
+      params: {}
+    threshold: 0.5
+```
+
+For semantic matching, the matcher owns a separate embedding strategy and
+constructs it once per experiment:
+
+```yaml
+evaluation:
+  k_values: [1, 5, 10]
+  evidence_metrics:
+    matcher:
+      strategy: embedding
+      params:
+        embedding_strategy: sentence_transformer
+        embedding_params:
+          model_name: sentence-transformers/all-MiniLM-L6-v2
+    threshold: 0.8
+```
+
+At each $k$, the first $k$ final retrieved chunks are evaluated directly in
+rank order, without parent-document deduplication. A chunk/evidence pair
+matches when its score is at least the configured threshold.
+`evidence_recall@k` is the fraction of gold evidence texts matched by at
+least one chunk, so each gold evidence text counts once. `evidence_precision@k`
+is the fraction of actually retrieved chunks in the top-$k$ prefix that
+match at least one gold evidence text. The score matrix is calculated once
+per case for the largest configured $k$ and reused for all cutoffs. Metric
+metadata records the matcher, threshold, and, for embedding matching, its
+embedding strategy and parameters.
+
+The lexical matcher uses lowercase word-token F1; the embedding matcher uses
+cosine similarity. Both are matching heuristics, not proof that a retrieved
+passage supports a claim. Thresholds above are examples rather than
+universally validated cutoffs. SciFact and SQuAD are intentionally not given
+fabricated evidence texts, and SQuAD answer spans remain answer ground truth,
+not supporting passages.
+
+See [configs/experiment_evidence_example.yaml](configs/experiment_evidence_example.yaml)
+and its tiny manually annotated [configs/evidence_example/](configs/evidence_example/)
+dataset for a BM25-only runnable example with no API calls or model downloads.
+To add a matcher, implement `EvidenceMatcher.score(retrieved_texts,
+evidence_texts)` in `evaluation/evidence/`, provide a stable `name` and
+metadata, then register it with `evidence_matcher_registry.register(...)`.
+The runner and evaluation engine use only that protocol and require no
+matcher-name changes.
 
 ### Experiments
 

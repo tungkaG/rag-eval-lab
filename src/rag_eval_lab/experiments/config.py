@@ -98,6 +98,14 @@ class IndexingConfig:
 
 
 @dataclass(slots=True)
+class EvidenceMetricsConfig:
+    """Explicit evidence matcher configuration; absent means evidence metrics are disabled."""
+
+    matcher: StrategyConfig
+    threshold: float
+
+
+@dataclass(slots=True)
 class EvaluationConfig:
     """`k_values` passed straight through to `EvaluationEngine`.
 
@@ -111,6 +119,7 @@ class EvaluationConfig:
 
     k_values: list[int] = field(default_factory=lambda: [1, 5, 10])
     answer_metrics: list[StrategyConfig] = field(default_factory=list)
+    evidence_metrics: EvidenceMetricsConfig | None = None
 
 
 @dataclass(slots=True)
@@ -206,6 +215,19 @@ def _generation_config(section: dict[str, Any] | None) -> GenerationConfig:
     return GenerationConfig(enabled=True, provider=provider, params=params)
 
 
+def _evidence_metrics_config(section: dict[str, Any] | None) -> EvidenceMetricsConfig | None:
+    if not section:
+        return None
+    matcher_section = _require_section(section, "matcher")
+    threshold = section.get("threshold")
+    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool):
+        raise ConfigurationError("'evaluation.evidence_metrics.threshold' must be a number")
+    return EvidenceMetricsConfig(
+        matcher=_strategy_config(matcher_section, "evaluation.evidence_metrics.matcher"),
+        threshold=float(threshold),
+    )
+
+
 def _parse_config(raw: Any) -> ExperimentConfig:
     if not isinstance(raw, dict):
         raise ConfigurationError("Experiment configuration must be a YAML mapping")
@@ -262,6 +284,7 @@ def _parse_config(raw: Any) -> ExperimentConfig:
     evaluation = EvaluationConfig(
         k_values=list(evaluation_section.get("k_values") or [1, 5, 10]),
         answer_metrics=answer_metrics,
+        evidence_metrics=_evidence_metrics_config(evaluation_section.get("evidence_metrics")),
     )
 
     output_section = raw.get("output") or {}
