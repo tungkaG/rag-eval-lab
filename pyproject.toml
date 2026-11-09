@@ -31,6 +31,9 @@ generation = [
 nli = [
     "transformers>=4.30",
 ]
+demo = [
+    "streamlit>=1.30",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
